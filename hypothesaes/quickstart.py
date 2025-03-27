@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .sae import SparseAutoencoder, load_model
 from .select_neurons import select_neurons
-from .interpret_neurons import NeuronInterpreter, InterpretConfig, ScoringConfig, LLMConfig, SamplingConfig
+from .interpret_neurons import NeuronInterpreter, InterpretConfig, ScoringConfig, LLMConfig, SamplingConfig, sample_top_zero, sample_percentile_bins
 from .utils import get_text_for_printing
 from .annotate import annotate_texts_with_concepts
 from .evaluation import score_hypotheses
@@ -232,6 +232,7 @@ def generate_hypotheses(
     scoring_metric: str = "f1",
     n_workers_interpretation: int = 10,
     n_workers_annotation: int = 30,
+    interpretation_sampling_function = "sample_top_zero",
     task_specific_instructions: Optional[str] = None,
 ) -> Union[pd.DataFrame, Tuple[pd.DataFrame, np.ndarray]]:
     """Generate interpretable hypotheses from text data using SAEs.
@@ -305,10 +306,16 @@ def generate_hypotheses(
         n_workers_annotation=n_workers_annotation,
     )
 
+    if interpretation_sampling_function == "sample_top_zero":
+        sampling_function = sample_top_zero 
+    elif interpretation_sampling_function == "sample_percentile_bins": 
+        sampling_function = sample_percentile_bins 
+
     interpret_config = InterpretConfig(
         sampling=SamplingConfig(
             n_examples=n_examples_for_interpretation,
             max_words_per_example=max_words_per_example,
+            interpretation_sampling_function = sampling_function 
         ),
         llm=LLMConfig(
             temperature=interpret_temperature,
