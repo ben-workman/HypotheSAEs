@@ -18,15 +18,14 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def train_sae(
     embeddings: Union[List, np.ndarray],
-    M: int,
-    K: int,
+    M: Union[int, List[int]],
+    K: Union[int, List[int]],
     *,
     checkpoint_dir: Optional[str] = None,
     overwrite_checkpoint: bool = False,
     val_embeddings: Optional[Union[List, np.ndarray]] = None,
     aux_k: Optional[int] = None,
     multi_k: Optional[int] = None,
-    nested_levels: Optional[List[int]] = None,  
     dead_neuron_threshold_steps: int = 256,
     batch_size: int = 512,
     learning_rate: float = 5e-4,
@@ -35,43 +34,17 @@ def train_sae(
     multi_coef: float = 0.0,
     patience: int = 3,
     clip_grad: float = 1.0,
-) -> SparseAutoencoder:
-    """Train a Sparse Autoencoder or load an existing one.
-    
-    Args:
-        embeddings: Pre-computed embeddings for training (list or numpy array)
-        M: Number of neurons in SAE
-        K: Number of top-activating neurons to keep per forward pass
-        checkpoint_dir: Optional directory for storing/loading SAE checkpoints
-        val_embeddings: Optional validation embeddings for early stopping during SAE training
-        aux_k: Number of neurons to consider for dead neuron revival
-        multi_k: Number of neurons for secondary reconstruction
-        nested_levels: If provided (e.g. [m1, m2, ..., M]), trains a Matryoshka SAE
-                       by enforcing that the first m1, m2, … neurons can reconstruct the input.
-        dead_neuron_threshold_steps: Number of non-firing steps after which a neuron is considered dead
-        batch_size: Batch size for training
-        learning_rate: Learning rate for training
-        n_epochs: Maximum number of training epochs
-        aux_coef: Coefficient for auxiliary loss
-        multi_coef: Coefficient for multi-k loss (only used for vanilla SAE)
-        patience: Early stopping patience
-        clip_grad: Gradient clipping value
-        
-    Returns:
-        Trained SparseAutoencoder model
-    """
+) -> "SparseAutoencoder":
     embeddings = np.array(embeddings)
     input_dim = embeddings.shape[1]
-    
     X = torch.tensor(embeddings, dtype=torch.float32).to(device)
     X_val = torch.tensor(val_embeddings, dtype=torch.float32).to(device) if val_embeddings is not None else None
-    
     if checkpoint_dir is not None:
         os.makedirs(checkpoint_dir, exist_ok=True)
-        checkpoint_path = os.path.join(checkpoint_dir, f"SAE_M={M}_K={K}.pt")
+        type_str = "nested" if isinstance(M, list) or isinstance(K, list) else "SAE"
+        checkpoint_path = os.path.join(checkpoint_dir, f"{type_str}_M={M}_K={K}.pt")
         if os.path.exists(checkpoint_path) and not overwrite_checkpoint:
             return load_model(checkpoint_path).to(device)
-    
     sae = SparseAutoencoder(
         input_dim=input_dim,
         m_total_neurons=M,
@@ -79,9 +52,7 @@ def train_sae(
         aux_k=aux_k,
         multi_k=multi_k,
         dead_neuron_threshold_steps=dead_neuron_threshold_steps,
-        nested_levels=nested_levels,  
     ).to(device)
-    
     sae.fit(
         X_train=X,
         X_val=X_val,
@@ -94,7 +65,6 @@ def train_sae(
         patience=patience,
         clip_grad=clip_grad,
     )
-
     return sae
 
 def interpret_sae(
