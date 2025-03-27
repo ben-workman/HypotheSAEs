@@ -14,7 +14,8 @@ def select_neurons_lasso(
     classification: bool = False,
     alpha: Optional[float] = None,
     max_iter: int = 1000,
-    verbose: bool = False
+    verbose: bool = False,
+    group_ids: Optional[np.ndarray] = None,
 ) -> Tuple[List[int], List[float]]:
     """
     Select neurons using an L1-regularized linear model (LASSO), which produces sparse coefficient vectors.
@@ -28,11 +29,23 @@ def select_neurons_lasso(
         alpha: LASSO alpha (if None, searches for alpha yielding n_select features)
         max_iter: Maximum iterations for LASSO
         verbose: Whether to print progress of alpha search
-    
+        group_ids: Optional array-like of group identifiers for aggregating activations and target values.
+        
     Returns:
         Indices of selected neurons and corresponding coefficients
     """
-    # Standardize features
+    
+    if group_ids is not None:
+        unique_ids = np.unique(group_ids)
+        aggregated_activations = []
+        aggregated_target = []
+        for uid in unique_ids:
+            indices = np.where(group_ids == uid)[0]
+            aggregated_activations.append(activations[indices].mean(axis=0))
+            aggregated_target.append(target[indices].mean())
+        activations = np.vstack(aggregated_activations)
+        target = np.array(aggregated_target)
+    
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(activations)
     
@@ -57,7 +70,6 @@ def select_neurons_lasso(
             print(f"Fitting took {time.time() - start_time:.2f}s")
         
     else:
-        # Search for alpha that gives desired number of features
         alpha_low, alpha_high = 1e-6, 1e4
         
         if verbose:
@@ -65,7 +77,7 @@ def select_neurons_lasso(
             print("-" * 40)
         
         total_start_time = time.time()
-        for iteration in range(20):  # Maximum binary search iterations
+        for iteration in range(20): 
             iter_start_time = time.time()
             alpha = np.sqrt(alpha_low * alpha_high)
             
@@ -101,9 +113,8 @@ def select_neurons_lasso(
         if n_nonzero != n_select:
             print(f"Warning: Search ended with {n_nonzero} features (target: {n_select})")
     
-    # Get top neurons by absolute coefficient value
     sorted_indices = np.argsort(-np.abs(coef))[:n_select]
-    selected_coefs = coef[sorted_indices]  # Return raw coefficients
+    selected_coefs = coef[sorted_indices]  
     
     return sorted_indices.tolist(), selected_coefs.tolist()
 
