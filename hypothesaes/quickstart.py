@@ -315,7 +315,7 @@ def generate_hypotheses(
         sampling=SamplingConfig(
             n_examples=n_examples_for_interpretation,
             max_words_per_example=max_words_per_example,
-            interpretation_sampling_function = sampling_function 
+            function = sampling_function 
         ),
         llm=LLMConfig(
             temperature=interpret_temperature,
