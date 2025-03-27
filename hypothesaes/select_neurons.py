@@ -111,27 +111,42 @@ def select_neurons_correlation(
     activations: np.ndarray,
     target: np.ndarray,
     n_select: int,
+    group_ids: np.ndarray = None,
     **kwargs
 ) -> Tuple[List[int], List[float]]:
     """
-    Select neurons with highest correlation with target.
-    Returns (indices, correlations) tuple.
+    Select neurons with the highest correlation with the target.
+    
+    If group_id is provided, activations and target values are aggregated by group 
+    (using the mean for each unique identifier) before computing correlations.
     
     Args:
         activations: Neuron activation matrix (n_samples, n_neurons)
         target: Target variable (n_samples,)
         n_select: Number of neurons to select
-        abs_correlation: Whether to use absolute correlation values
+        group_ids: Optional array-like of group identifiers (e.g., NCTETID) for aggregation.
     
     Returns:
-        Indices of selected neurons and corresponding correlations
+        A tuple of:
+            - List of indices of selected neurons.
+            - List of corresponding raw correlation values.
     """
+    if group_ids is not None:
+        unique_ids = np.unique(group_ids)
+        aggregated_activations = []
+        aggregated_target = []
+        for uid in unique_ids:
+            indices = np.where(group_ids == uid)[0]
+            aggregated_activations.append(activations[indices].mean(axis=0))
+            aggregated_target.append(target[indices].mean())
+        activations = np.vstack(aggregated_activations)
+        target = np.array(aggregated_target)
+    
     correlations = np.array([
         pearsonr(activations[:, i], target)[0]
         for i in range(activations.shape[1])
     ])
     
-    # Sort by absolute correlation but return raw correlations
     sorted_indices = np.argsort(-np.abs(correlations))[:n_select]
     selected_correlations = correlations[sorted_indices]
     

@@ -216,6 +216,7 @@ def generate_hypotheses(
     embeddings: Union[List, np.ndarray],
     sae: Union[SparseAutoencoder, List[SparseAutoencoder]],
     cache_name: str,
+    group_ids: Optional[np.ndarray] = None, 
     *,
     classification: Optional[bool] = None,
     selection_method: str = "separation_score",
@@ -282,6 +283,19 @@ def generate_hypotheses(
     if n_selected_neurons > activations.shape[1]:
         raise ValueError(f"n_selected_neurons ({n_selected_neurons}) can be at most the total number of neurons ({activations.shape[1]})")
     
+    extra_args = {}
+    if selection_method == "correlation" and group_ids is not None:
+        extra_args["group_ids"] = group_ids
+
+    selected_neurons, scores = select_neurons(
+        activations=activations,
+        target=labels,
+        n_select=n_selected_neurons,
+        method=selection_method,
+        classification=classification,
+        **extra_args
+    )
+
     selected_neurons, scores = select_neurons(
         activations=activations,
         target=labels,
