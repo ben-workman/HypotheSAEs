@@ -294,17 +294,8 @@ def generate_hypotheses(
         method=selection_method,
         classification=classification,
         **extra_args
-    )
-
-    selected_neurons, scores = select_neurons(
-        activations=activations,
-        target=labels,
-        n_select=n_selected_neurons,
-        method=selection_method,
-        classification=classification,
-        verbose=True,
-    )
-
+    ) 
+    
     print(f"\nStep 2: Interpreting selected neurons")
     interpreter = NeuronInterpreter(
         cache_name=cache_name,
