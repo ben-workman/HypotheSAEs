@@ -52,6 +52,7 @@ def train_sae(
         aux_k=aux_k,
         multi_k=multi_k,
         dead_neuron_threshold_steps=dead_neuron_threshold_steps,
+        nested_levels=M if isinstance(M, list) else None,
     ).to(device)
     sae.fit(
         X_train=X,

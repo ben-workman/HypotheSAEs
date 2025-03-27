@@ -21,6 +21,7 @@ class SparseAutoencoder(nn.Module):
         aux_k: Optional[int] = None,
         multi_k: Optional[int] = None,
         dead_neuron_threshold_steps: int = 256,
+        nested_levels: Optional[List[int]] = None
     ):
         super().__init__()
         if isinstance(m_total_neurons, list) and isinstance(k_active_neurons, list):
@@ -56,8 +57,7 @@ class SparseAutoencoder(nn.Module):
                 topk_values, topk_indices = torch.topk(group_features, k=k, dim=-1)
                 sparse_group = torch.zeros_like(group_features)
                 sparse_group.scatter_(dim=-1, index=topk_indices, src=topk_values)
-                group_weights = self.decoder.weight[:, :m]
-                current_output = self.input_bias + sparse_group @ group_weights
+                current_output = self.input_bias + sparse_group @ self.decoder.weight[:, :m].T
                 nested_outputs.append(current_output)
             self.steps_since_activation += 1
             return nested_outputs[-1], {"nested_outputs": nested_outputs, "activations": features}
@@ -112,12 +112,11 @@ class SparseAutoencoder(nn.Module):
         nn.init.zeros_(self.neuron_bias)
 
     def save(self, save_path: str):
-        dirname = os.path.dirname(save_path)
-        os.makedirs(dirname, exist_ok=True)
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
         base = os.path.basename(save_path)
         if self.nested:
             base = "nested_" + base
-        save_path = os.path.join(dirname, base)
+        save_path = os.path.join(os.path.dirname(save_path), base)
         config = {
             'input_dim': self.input_dim,
             'm_total_neurons': self.m_total_neurons if not self.nested else self.nested_levels,
@@ -125,6 +124,7 @@ class SparseAutoencoder(nn.Module):
             'aux_k': self.aux_k,
             'multi_k': self.multi_k,
             'dead_neuron_threshold_steps': self.dead_neuron_threshold_steps,
+            'nested_levels': self.nested_levels
         }
         torch.save({
             'config': config,
@@ -152,7 +152,7 @@ class SparseAutoencoder(nn.Module):
             if self.aux_k is not None:
                 error = x - recon.detach()
                 aux_activations = torch.zeros_like(info["activations"])
-                aux_activations.scatter_(-1, info.get("aux_indices", torch.zeros(0, device=x.device)), info.get("aux_values", torch.zeros(0, device=x.device)))
+                aux_activations.scatter_(-1, info["aux_indices"], info["aux_values"])
                 error_reconstruction = self.decoder(aux_activations)
                 aux_loss = normalized_mse(error_reconstruction, error)
                 loss += aux_coef * aux_loss
@@ -277,4 +277,4 @@ def get_multiple_sae_activations(sae_list, X, return_neuron_source_info=False):
     if return_neuron_source_info:
         return activations, neuron_source_sae_info
     else:
-        return activations 
+        return activations
