@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, List, Union
 from tqdm.auto import tqdm
 import os
 import pickle
@@ -18,9 +18,10 @@ class SparseAutoencoder(nn.Module):
         input_dim: int,
         m_total_neurons: int,
         k_active_neurons: int,
-        aux_k: Optional[int] = None, # Number of neurons to consider for dead neuron revival
-        multi_k: Optional[int] = None, # Number of neurons for secondary reconstruction
-        dead_neuron_threshold_steps: int = 256 # Number of non-firing steps after which a neuron is considered dead
+        aux_k: Optional[int] = None,  # Number of neurons to consider for dead neuron revival
+        multi_k: Optional[int] = None,  # Number of neurons for secondary reconstruction
+        dead_neuron_threshold_steps: int = 256,  # Number of non-firing steps after which a neuron is considered dead
+        nested_levels: Optional[List[int]] = None  # List of nested latent sizes for Matryoshka training
     ):
         super().__init__()
         self.input_dim = input_dim
@@ -29,6 +30,7 @@ class SparseAutoencoder(nn.Module):
         self.aux_k = 2 * k_active_neurons if aux_k is None else aux_k
         self.multi_k = 4 * k_active_neurons if multi_k is None else multi_k
         self.dead_neuron_threshold_steps = dead_neuron_threshold_steps
+        self.nested_levels = nested_levels 
 
         # Core layers
         self.encoder = nn.Linear(input_dim, m_total_neurons, bias=False)
@@ -53,7 +55,7 @@ class SparseAutoencoder(nn.Module):
         topk_values, topk_indices = torch.topk(pre_act, k=self.k_active_neurons, dim=-1)
         topk_values = F.relu(topk_values)
         
-        # Multi-k activation for loss computation
+        # Multi-k activation for (vanilla) loss computation
         multik_values, multik_indices = torch.topk(pre_act, k=self.multi_k, dim=-1)
         multik_values = F.relu(multik_values)
         
@@ -132,7 +134,8 @@ class SparseAutoencoder(nn.Module):
             'k_active_neurons': self.k_active_neurons,
             'aux_k': self.aux_k,
             'multi_k': self.multi_k,
-            'dead_neuron_threshold_steps': self.dead_neuron_threshold_steps
+            'dead_neuron_threshold_steps': self.dead_neuron_threshold_steps,
+            'nested_levels': self.nested_levels  # Save the nested levels configuration
         }
         
         torch.save({
@@ -151,26 +154,48 @@ class SparseAutoencoder(nn.Module):
         aux_coef: float = 1/32,
         multi_coef: float = 0.0
     ) -> torch.Tensor:
-        """Compute SAE loss with auxiliary terms."""
+        """Compute SAE loss with auxiliary terms.
+           If self.nested_levels is provided, compute nested reconstruction losses
+           using only the first m latents for each m in self.nested_levels.
+        """
         def normalized_mse(pred, target):
             mse = F.mse_loss(pred, target)
             baseline_mse = F.mse_loss(target.mean(dim=0, keepdim=True).expand_as(target), target)
             return mse / baseline_mse
         
-        recon_loss = normalized_mse(recon, x)
-        recon_loss += multi_coef * normalized_mse(info["multik_reconstruction"], x)
-        
-        if self.aux_k is not None:
-            error = x - recon.detach()
-            aux_activations = torch.zeros_like(info["activations"])
-            aux_activations.scatter_(-1, info["aux_indices"], info["aux_values"])
-            error_reconstruction = self.decoder(aux_activations)
-            aux_loss = normalized_mse(error_reconstruction, error)
-            total_loss = recon_loss + aux_coef * aux_loss
+        # If nested_levels is provided, compute Matryoshka loss
+        if self.nested_levels is not None:
+            nested_loss = 0.0
+            for m in self.nested_levels:
+                # Reconstruct using only the first m latents
+                rec_m = F.linear(info["activations"][:, :m], self.decoder.weight[:, :m]) + self.input_bias
+                nested_loss += normalized_mse(rec_m, x)
+            loss = nested_loss
+            # Optionally add auxiliary loss for dead neuron revival
+            if self.aux_k is not None:
+                error = x - recon.detach()
+                aux_activations = torch.zeros_like(info["activations"])
+                aux_activations.scatter_(-1, info["aux_indices"], info["aux_values"])
+                error_reconstruction = self.decoder(aux_activations)
+                aux_loss = normalized_mse(error_reconstruction, error)
+                loss += aux_coef * aux_loss
+            return loss
         else:
-            total_loss = recon_loss
+            # Vanilla SAE loss
+            recon_loss = normalized_mse(recon, x)
+            recon_loss += multi_coef * normalized_mse(info["multik_reconstruction"], x)
             
-        return total_loss
+            if self.aux_k is not None:
+                error = x - recon.detach()
+                aux_activations = torch.zeros_like(info["activations"])
+                aux_activations.scatter_(-1, info["aux_indices"], info["aux_values"])
+                error_reconstruction = self.decoder(aux_activations)
+                aux_loss = normalized_mse(error_reconstruction, error)
+                total_loss = recon_loss + aux_coef * aux_loss
+            else:
+                total_loss = recon_loss
+                
+            return total_loss
 
     def fit(
         self,

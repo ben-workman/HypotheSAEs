@@ -26,6 +26,7 @@ def train_sae(
     val_embeddings: Optional[Union[List, np.ndarray]] = None,
     aux_k: Optional[int] = None,
     multi_k: Optional[int] = None,
+    nested_levels: Optional[List[int]] = None,  
     dead_neuron_threshold_steps: int = 256,
     batch_size: int = 512,
     learning_rate: float = 5e-4,
@@ -45,12 +46,14 @@ def train_sae(
         val_embeddings: Optional validation embeddings for early stopping during SAE training
         aux_k: Number of neurons to consider for dead neuron revival
         multi_k: Number of neurons for secondary reconstruction
+        nested_levels: If provided (e.g. [m1, m2, ..., M]), trains a Matryoshka SAE
+                       by enforcing that the first m1, m2, … neurons can reconstruct the input.
         dead_neuron_threshold_steps: Number of non-firing steps after which a neuron is considered dead
         batch_size: Batch size for training
         learning_rate: Learning rate for training
         n_epochs: Maximum number of training epochs
         aux_coef: Coefficient for auxiliary loss
-        multi_coef: Coefficient for multi-k loss
+        multi_coef: Coefficient for multi-k loss (only used for vanilla SAE)
         patience: Early stopping patience
         clip_grad: Gradient clipping value
         
@@ -76,6 +79,7 @@ def train_sae(
         aux_k=aux_k,
         multi_k=multi_k,
         dead_neuron_threshold_steps=dead_neuron_threshold_steps,
+        nested_levels=nested_levels,  
     ).to(device)
     
     sae.fit(
