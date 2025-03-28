@@ -18,8 +18,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def train_sae(
     embeddings: Union[list, np.ndarray],
-    M: Union[int, list],  # Matryoshka change: M can now be a list of nested dictionary sizes
-    K: Union[int, list],  # Matryoshka change: K can now be a list of corresponding active neuron counts
+    M: Union[int, list],  
+    K: int,  
     *,
     checkpoint_dir: Optional[str] = None,
     overwrite_checkpoint: bool = False,
