@@ -6,6 +6,7 @@ from typing import List, Optional, Union, Tuple, Dict
 import torch
 import os
 from pathlib import Path
+import random
 
 from .sae import SparseAutoencoder, load_model
 from .select_neurons import select_neurons
@@ -15,6 +16,15 @@ from .annotate import annotate_texts_with_concepts
 from .evaluation import score_hypotheses
 BASE_DIR = Path(__file__).parent.parent
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+seed = 123 
+random.seed(seed)
+np.random.seed(seed)
+torch.manual_seed(seed)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(seed)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
 
 def train_sae(
     embeddings: Union[list, np.ndarray],
