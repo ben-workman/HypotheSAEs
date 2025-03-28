@@ -17,13 +17,13 @@ BASE_DIR = Path(__file__).parent.parent
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def train_sae(
-    embeddings: Union[List, np.ndarray],
-    M: int,
-    K: int,
+    embeddings: Union[list, np.ndarray],
+    M: Union[int, list],  # Matryoshka change: M can now be a list of nested dictionary sizes
+    K: Union[int, list],  # Matryoshka change: K can now be a list of corresponding active neuron counts
     *,
     checkpoint_dir: Optional[str] = None,
     overwrite_checkpoint: bool = False,
-    val_embeddings: Optional[Union[List, np.ndarray]] = None,
+    val_embeddings: Optional[Union[list, np.ndarray]] = None,
     aux_k: Optional[int] = None,
     multi_k: Optional[int] = None,
     dead_neuron_threshold_steps: int = 256,
@@ -38,24 +38,26 @@ def train_sae(
     """Train a Sparse Autoencoder or load an existing one.
     
     Args:
-        embeddings: Pre-computed embeddings for training (list or numpy array)
-        M: Number of neurons in SAE
-        K: Number of top-activating neurons to keep per forward pass
-        checkpoint_dir: Optional directory for storing/loading SAE checkpoints
-        val_embeddings: Optional validation embeddings for early stopping during SAE training
-        aux_k: Number of neurons to consider for dead neuron revival
-        multi_k: Number of neurons for secondary reconstruction
-        dead_neuron_threshold_steps: Number of non-firing steps after which a neuron is considered dead
-        batch_size: Batch size for training
-        learning_rate: Learning rate for training
-        n_epochs: Maximum number of training epochs
-        aux_coef: Coefficient for auxiliary loss
-        multi_coef: Coefficient for multi-k loss
-        patience: Early stopping patience
-        clip_grad: Gradient clipping value
+        embeddings: Pre-computed embeddings for training (list or numpy array).
+        M: Number of neurons in SAE. If provided as a list [m1, m2, ..., mn] (with m1 < ... < mn),
+           the model trains a Matryoshka Sparse Autoencoder with nested dictionary sizes.
+        K: Number of top-activating neurons to keep per forward pass. If provided as a list, it specifies
+           the corresponding active neuron counts for each nested sub-SAE.
+        checkpoint_dir: Optional directory for storing/loading SAE checkpoints.
+        val_embeddings: Optional validation embeddings for early stopping during SAE training.
+        aux_k: Number of neurons to consider for dead neuron revival.
+        multi_k: Number of neurons for secondary reconstruction.
+        dead_neuron_threshold_steps: Number of non-firing steps after which a neuron is considered dead.
+        batch_size: Batch size for training.
+        learning_rate: Learning rate for training.
+        n_epochs: Maximum number of training epochs.
+        aux_coef: Coefficient for auxiliary loss.
+        multi_coef: Coefficient for multi-k loss.
+        patience: Early stopping patience.
+        clip_grad: Gradient clipping value.
         
     Returns:
-        Trained SparseAutoencoder model
+        Trained SparseAutoencoder model.
     """
     embeddings = np.array(embeddings)
     input_dim = embeddings.shape[1]

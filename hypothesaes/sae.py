@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, Union  # <-- Added Union for type annotations
 from tqdm.auto import tqdm
 import os
 import pickle
@@ -16,30 +16,44 @@ class SparseAutoencoder(nn.Module):
     def __init__(
         self, 
         input_dim: int,
-        m_total_neurons: int,
-        k_active_neurons: int,
+        m_total_neurons: Union[int, list],  # Matryoshka change: allow list
+        k_active_neurons: Union[int, list],   # Matryoshka change: allow list
         aux_k: Optional[int] = None, # Number of neurons to consider for dead neuron revival
         multi_k: Optional[int] = None, # Number of neurons for secondary reconstruction
         dead_neuron_threshold_steps: int = 256 # Number of non-firing steps after which a neuron is considered dead
     ):
         super().__init__()
         self.input_dim = input_dim
-        self.m_total_neurons = m_total_neurons
-        self.k_active_neurons = k_active_neurons
-        self.aux_k = 2 * k_active_neurons if aux_k is None else aux_k
-        self.multi_k = 4 * k_active_neurons if multi_k is None else multi_k
+        # If m_total_neurons is provided as a list, store it and set m_total_neurons to its maximum value.
+        if isinstance(m_total_neurons, list):
+            self.m_list = m_total_neurons  # Matryoshka change: store the list of nested sizes
+            self.m_total_neurons = m_total_neurons[-1]
+        else:
+            self.m_list = None
+            self.m_total_neurons = m_total_neurons
+        
+        # Similarly, if k_active_neurons is a list, store it and use its maximum for actual activation.
+        if isinstance(k_active_neurons, list):
+            self.k_list = k_active_neurons  # Matryoshka change: store the list of nested active counts
+            self.k_active_neurons = k_active_neurons[-1]
+        else:
+            self.k_list = None
+            self.k_active_neurons = k_active_neurons
+
+        self.aux_k = 2 * self.k_active_neurons if aux_k is None else aux_k
+        self.multi_k = 4 * self.k_active_neurons if multi_k is None else multi_k
         self.dead_neuron_threshold_steps = dead_neuron_threshold_steps
 
         # Core layers
-        self.encoder = nn.Linear(input_dim, m_total_neurons, bias=False)
-        self.decoder = nn.Linear(m_total_neurons, input_dim, bias=False)
+        self.encoder = nn.Linear(input_dim, self.m_total_neurons, bias=False)
+        self.decoder = nn.Linear(self.m_total_neurons, input_dim, bias=False)
         
         # Biases as separate parameters
         self.input_bias = nn.Parameter(torch.zeros(input_dim))
-        self.neuron_bias = nn.Parameter(torch.zeros(m_total_neurons))
+        self.neuron_bias = nn.Parameter(torch.zeros(self.m_total_neurons))
         
         # Tracking dead neurons
-        self.steps_since_activation = torch.zeros(m_total_neurons, dtype=torch.long, device=device)
+        self.steps_since_activation = torch.zeros(self.m_total_neurons, dtype=torch.long, device=device)
 
         # Put model on correct device
         self.to(device)
@@ -48,19 +62,19 @@ class SparseAutoencoder(nn.Module):
         # Center input
         x = x - self.input_bias
         pre_act = self.encoder(x) + self.neuron_bias
+        # Compute full activation f(x) = ReLU(pre_act)
+        f_full = F.relu(pre_act)  # Matryoshka change: store full activation for multi-scale reconstruction
         
-        # Main top-k activation
-        topk_values, topk_indices = torch.topk(pre_act, k=self.k_active_neurons, dim=-1)
-        topk_values = F.relu(topk_values)
-        
-        # Multi-k activation for loss computation
-        multik_values, multik_indices = torch.topk(pre_act, k=self.multi_k, dim=-1)
-        multik_values = F.relu(multik_values)
+        # Main top-k activation using the full activations
+        topk_values, topk_indices = torch.topk(f_full, k=self.k_active_neurons, dim=-1)
+        # (Redundant ReLU call removed since f_full is already ReLU)
         
         # Create sparse activation tensors
         activations = torch.zeros_like(pre_act)
         activations.scatter_(-1, topk_indices, topk_values)
         
+        # Multi-k activation for loss computation
+        multik_values, multik_indices = torch.topk(f_full, k=self.multi_k, dim=-1)
         multik_activations = torch.zeros_like(pre_act)
         multik_activations.scatter_(-1, multik_indices, multik_values)
         
@@ -68,7 +82,7 @@ class SparseAutoencoder(nn.Module):
         self.steps_since_activation += 1
         self.steps_since_activation.scatter_(0, topk_indices.unique(), 0)
         
-        # Compute reconstructions
+        # Compute reconstructions from sparse activations
         reconstruction = self.decoder(activations) + self.input_bias
         multik_reconstruction = self.decoder(multik_activations) + self.input_bias
         
@@ -87,6 +101,7 @@ class SparseAutoencoder(nn.Module):
             "multik_reconstruction": multik_reconstruction,
             "aux_indices": aux_indices,
             "aux_values": aux_values,
+            "f_full": f_full  # Matryoshka change: include full activations for multi-scale loss
         }
 
     def reconstruct_input_from_latents(self, indices: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
@@ -128,8 +143,8 @@ class SparseAutoencoder(nn.Module):
         
         config = {
             'input_dim': self.input_dim,
-            'm_total_neurons': self.m_total_neurons,
-            'k_active_neurons': self.k_active_neurons,
+            'm_total_neurons': self.m_total_neurons if self.m_list is None else self.m_list,  # Matryoshka change: save original list if available
+            'k_active_neurons': self.k_active_neurons if self.k_list is None else self.k_list,   # Matryoshka change: save original list if available
             'aux_k': self.aux_k,
             'multi_k': self.multi_k,
             'dead_neuron_threshold_steps': self.dead_neuron_threshold_steps
@@ -151,14 +166,28 @@ class SparseAutoencoder(nn.Module):
         aux_coef: float = 1/32,
         multi_coef: float = 0.0
     ) -> torch.Tensor:
-        """Compute SAE loss with auxiliary terms."""
+        """Compute SAE loss with auxiliary terms.
+        
+        For Matryoshka SAEs (when m_total_neurons was provided as a list), the loss is computed as the sum over
+        reconstruction losses for each nested sub-SAE using the first m latent features:
+            L(x) = Σ_{m ∈ M} || x - (f(x)[:m] @ W_dec[:, :m].T + b_dec) ||² + α L_aux.
+        Otherwise, the standard reconstruction and multi-k loss is used.
+        """
         def normalized_mse(pred, target):
             mse = F.mse_loss(pred, target)
             baseline_mse = F.mse_loss(target.mean(dim=0, keepdim=True).expand_as(target), target)
             return mse / baseline_mse
         
-        recon_loss = normalized_mse(recon, x)
-        recon_loss += multi_coef * normalized_mse(info["multik_reconstruction"], x)
+        if self.m_list is not None:
+            # Matryoshka multi-scale reconstruction loss
+            f_full = info["f_full"]
+            total_loss = 0.0
+            for m in self.m_list:
+                # Reconstruction using only the first m latent features
+                reconstruction_m = f_full[:, :m] @ self.decoder.weight[:, :m].T + self.input_bias
+                total_loss += normalized_mse(reconstruction_m, x)
+        else:
+            total_loss = normalized_mse(recon, x) + multi_coef * normalized_mse(info["multik_reconstruction"], x)
         
         if self.aux_k is not None:
             error = x - recon.detach()
@@ -166,9 +195,7 @@ class SparseAutoencoder(nn.Module):
             aux_activations.scatter_(-1, info["aux_indices"], info["aux_values"])
             error_reconstruction = self.decoder(aux_activations)
             aux_loss = normalized_mse(error_reconstruction, error)
-            total_loss = recon_loss + aux_coef * aux_loss
-        else:
-            total_loss = recon_loss
+            total_loss += aux_coef * aux_loss
             
         return total_loss
 
@@ -186,21 +213,35 @@ class SparseAutoencoder(nn.Module):
         show_progress: bool = True,
         clip_grad: float = 1.0
     ) -> Dict:
-        """Train the sparse autoencoder on input data."""
+        """Train the sparse autoencoder on input data.
+        
+        Args:
+            X_train: Training data tensor.
+            X_val: Optional validation data tensor.
+            save_dir: Optional directory to save the trained model.
+            batch_size: Batch size for training.
+            learning_rate: Learning rate for training.
+            n_epochs: Maximum number of training epochs.
+            aux_coef: Coefficient for auxiliary loss.
+            multi_coef: Coefficient for multi-k loss.
+            patience: Early stopping patience.
+            show_progress: Whether to display a progress bar.
+            clip_grad: Gradient clipping value.
+        
+        Returns:
+            A dictionary containing training history.
+        """
         train_loader = DataLoader(TensorDataset(X_train), batch_size=batch_size, shuffle=True)
         val_loader = DataLoader(TensorDataset(X_val), batch_size=batch_size) if X_val is not None else None
         
-        # Initialize from batch of data
         self.initialize_weights_(X_train.to(device))
         
         optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate)
         
-        # Training loop setup
         best_val_loss = float('inf')
         patience_counter = 0
         history = {'train_loss': [], 'val_loss': [], 'dead_neuron_ratio': []}
         
-        # Training loop
         iterator = tqdm(range(n_epochs)) if show_progress else range(n_epochs)
         for epoch in iterator:
             self.train()
@@ -215,7 +256,6 @@ class SparseAutoencoder(nn.Module):
                 loss.backward()
                 self.adjust_decoder_gradient_()
                 
-                # Apply gradient clipping
                 if clip_grad is not None:
                     torch.nn.utils.clip_grad_norm_(self.parameters(), clip_grad)
                 
@@ -227,11 +267,9 @@ class SparseAutoencoder(nn.Module):
             avg_train_loss = np.mean(train_losses)
             history['train_loss'].append(avg_train_loss)
             
-            # Track dead neurons
             dead_ratio = (self.steps_since_activation > self.dead_neuron_threshold_steps).float().mean().item()
             history['dead_neuron_ratio'].append(dead_ratio)
             
-            # Validation
             if val_loader is not None:
                 self.eval()
                 val_losses = []
@@ -245,7 +283,6 @@ class SparseAutoencoder(nn.Module):
                 avg_val_loss = np.mean(val_losses)
                 history['val_loss'].append(avg_val_loss)
                 
-                # Early stopping check
                 if avg_val_loss < best_val_loss:
                     best_val_loss = avg_val_loss
                     patience_counter = 0
@@ -255,7 +292,6 @@ class SparseAutoencoder(nn.Module):
                         print(f"Early stopping triggered after {epoch+1} epochs")
                         break
             
-            # Update progress bar
             if show_progress:
                 iterator.set_postfix({
                     'train_loss': f'{avg_train_loss:.4f}',
@@ -263,7 +299,6 @@ class SparseAutoencoder(nn.Module):
                     'dead_ratio': f'{dead_ratio:.3f}'
                 })
         
-        # Save final model
         if save_dir is not None:
             os.makedirs(save_dir, exist_ok=True)
             self.save(os.path.join(save_dir, f'SAE_M={self.m_total_neurons}_K={self.k_active_neurons}.pt'))
@@ -274,11 +309,11 @@ class SparseAutoencoder(nn.Module):
         """Get sparse activations for input data with batching to prevent CUDA OOM.
         
         Args:
-            inputs: Input data as numpy array or torch tensor
-            batch_size: Number of samples per batch (default: 16384)
+            inputs: Input data as numpy array or torch tensor.
+            batch_size: Number of samples per batch (default: 16384).
         
         Returns:
-            Numpy array of activations
+            Numpy array of activations.
         """
         self.eval()
         
@@ -300,7 +335,18 @@ class SparseAutoencoder(nn.Module):
 def load_model(path: str) -> SparseAutoencoder:
     """Load a saved model from path."""
     checkpoint = torch.load(path, pickle_module=pickle)
-    model = SparseAutoencoder(**checkpoint['config'])
+    config = checkpoint['config']
+    # Restore list types if needed
+    m_total = config['m_total_neurons']
+    k_active = config['k_active_neurons']
+    model = SparseAutoencoder(
+        input_dim=config['input_dim'],
+        m_total_neurons=m_total,
+        k_active_neurons=k_active,
+        aux_k=config['aux_k'],
+        multi_k=config['multi_k'],
+        dead_neuron_threshold_steps=config['dead_neuron_threshold_steps']
+    )
     model.load_state_dict(checkpoint['state_dict'])
     print(f"Loaded model from {path}")
     return model
