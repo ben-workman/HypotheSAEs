@@ -52,14 +52,20 @@ class SparseAutoencoder(nn.Module):
         if self.nested:
             features = F.relu(pre_act)
             nested_outputs = []
+            all_topk_indices = []
             for m, k in zip(self.nested_levels, self.nested_ks):
                 group_features = features[:, :m]
                 topk_values, topk_indices = torch.topk(group_features, k=k, dim=-1)
+                all_topk_indices.append(topk_indices)
                 sparse_group = torch.zeros_like(group_features)
                 sparse_group.scatter_(dim=-1, index=topk_indices, src=topk_values)
                 current_output = self.input_bias + sparse_group @ self.decoder.weight[:, :m].T
                 nested_outputs.append(current_output)
+                all_topk_indices_flat = [t.view(-1) for t in all_topk_indices]
+                union_indices = torch.unique(torch.cat(all_topk_indices_flat, dim=0))
+
             self.steps_since_activation += 1
+            self.steps_since_activation.scatter_(0, union_indices, 0)
             return nested_outputs[-1], {"nested_outputs": nested_outputs, "activations": features}
         else:
             topk_values, topk_indices = torch.topk(pre_act, k=self.k_active_neurons, dim=-1)
@@ -146,17 +152,17 @@ class SparseAutoencoder(nn.Module):
             baseline_mse = F.mse_loss(target.mean(dim=0, keepdim=True).expand_as(target), target)
             return mse / baseline_mse
         if self.nested:
-            loss = 0.0
-            for rec in info["nested_outputs"]:
-                loss += normalized_mse(rec, x)
-            if self.aux_k is not None:
-                error = x - recon.detach()
-                aux_activations = torch.zeros_like(info["activations"])
-                aux_activations.scatter_(-1, info["aux_indices"], info["aux_values"])
-                error_reconstruction = self.decoder(aux_activations)
-                aux_loss = normalized_mse(error_reconstruction, error)
-                loss += aux_coef * aux_loss
-            return loss
+          loss = 0.0
+          for rec in info["nested_outputs"]:
+              loss += normalized_mse(rec, x)
+          if self.aux_k is not None and "aux_indices" in info and info["aux_indices"] is not None:
+              error = x - recon.detach()
+              aux_activations = torch.zeros_like(info["activations"])
+              aux_activations.scatter_(-1, info["aux_indices"], info["aux_values"])
+              error_reconstruction = self.decoder(aux_activations)
+              aux_loss = normalized_mse(error_reconstruction, error)
+              loss += aux_coef * aux_loss
+          return loss
         else:
             recon_loss = normalized_mse(recon, x)
             recon_loss += multi_coef * normalized_mse(info["multik_reconstruction"], x)

@@ -66,7 +66,7 @@ def train_sae(
         patience=patience,
         clip_grad=clip_grad,
     )
-    return sae
+    return sae 
 
 def interpret_sae(
     texts: List[str],
