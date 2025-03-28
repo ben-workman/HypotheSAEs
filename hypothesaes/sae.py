@@ -166,29 +166,25 @@ class SparseAutoencoder(nn.Module):
         aux_coef: float = 1/32,
         multi_coef: float = 0.0
     ) -> torch.Tensor:
-        """Compute SAE loss with auxiliary terms.
-        
-        For Matryoshka SAEs (when m_total_neurons was provided as a list), the loss is computed as the sum over
-        reconstruction losses for each nested sub-SAE using the first m latent features:
-            L(x) = Σ_{m ∈ M} || x - (f(x)[:m] @ W_dec[:, :m].T + b_dec) ||² + α L_aux.
-        Otherwise, the standard reconstruction and multi-k loss is used.
-        """
         def normalized_mse(pred, target):
             mse = F.mse_loss(pred, target)
             baseline_mse = F.mse_loss(target.mean(dim=0, keepdim=True).expand_as(target), target)
             return mse / baseline_mse
-        
-        if self.m_list is not None:
-            # Matryoshka multi-scale reconstruction loss
+
+        if self.m_list is not None and self.k_list is not None:
             f_full = info["f_full"]
             total_loss = 0.0
-            for m in self.m_list:
-                # Reconstruction using only the first m latent features
-                reconstruction_m = f_full[:, :m] @ self.decoder.weight[:, :m].T + self.input_bias
+            for i, m in enumerate(self.m_list):
+                k = self.k_list[i]
+                sub_activation = f_full[:, :m]
+                sub_topk_values, sub_topk_indices = torch.topk(sub_activation, k=k, dim=-1)
+                sparse_sub_activation = torch.zeros_like(sub_activation)
+                sparse_sub_activation.scatter_(-1, sub_topk_indices, sub_topk_values)
+                reconstruction_m = sparse_sub_activation @ self.decoder.weight[:, :m].T + self.input_bias
                 total_loss += normalized_mse(reconstruction_m, x)
         else:
             total_loss = normalized_mse(recon, x) + multi_coef * normalized_mse(info["multik_reconstruction"], x)
-        
+
         if self.aux_k is not None:
             error = x - recon.detach()
             aux_activations = torch.zeros_like(info["activations"])
@@ -196,7 +192,7 @@ class SparseAutoencoder(nn.Module):
             error_reconstruction = self.decoder(aux_activations)
             aux_loss = normalized_mse(error_reconstruction, error)
             total_loss += aux_coef * aux_loss
-            
+
         return total_loss
 
     def fit(
