@@ -17,12 +17,6 @@ from .evaluation import score_hypotheses
 BASE_DIR = Path(__file__).parent.parent
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
 
-def _format_param_for_filename(param: Union[int, List[int], np.ndarray]) -> str:
-    if isinstance(param, (list, tuple, np.ndarray)):
-        return "-".join(str(int(x)) for x in param)
-    else:
-        return str(int(param)) 
-
 def train_sae(
     embeddings: Union[list, np.ndarray],
     M: Union[int, list],  
@@ -82,12 +76,17 @@ def train_sae(
     X = torch.tensor(embeddings, dtype=torch.float32).to(device)
     X_val = torch.tensor(val_embeddings, dtype=torch.float32).to(device) if val_embeddings is not None else None
     
-    M_str = _format_param_for_filename(M)
-    K_str = _format_param_for_filename(K)
+    def _format_param_for_filename(param):
+        if isinstance(param, (list, tuple, np.ndarray)):
+            return "-".join(str(int(x)) for x in param)
+        else:
+            return str(int(param)) 
 
     if checkpoint_dir is not None:
         os.makedirs(checkpoint_dir, exist_ok=True)
-        checkpoint_path = os.path.join(checkpoint_dir, f"SAE_M={M_str}_K={K_str}.pt")
+        m_str = _format_param_for_filename(M)
+        k_str = _format_param_for_filename(K)
+        checkpoint_path = os.path.join(checkpoint_dir, f"SAE_M={m_str}_K={k_str}.pt")
         if os.path.exists(checkpoint_path) and not overwrite_checkpoint:
             return load_model(checkpoint_path).to(device)
     
