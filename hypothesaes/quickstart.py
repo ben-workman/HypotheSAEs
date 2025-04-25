@@ -15,7 +15,13 @@ from .utils import get_text_for_printing
 from .annotate import annotate_texts_with_concepts
 from .evaluation import score_hypotheses
 BASE_DIR = Path(__file__).parent.parent
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
+
+def _format_param_for_filename(param: Union[int, List[int], np.ndarray]) -> str:
+    if isinstance(param, (list, tuple, np.ndarray)):
+        return "-".join(str(int(x)) for x in param)
+    else:
+        return str(int(param)) 
 
 def train_sae(
     embeddings: Union[list, np.ndarray],
@@ -76,9 +82,12 @@ def train_sae(
     X = torch.tensor(embeddings, dtype=torch.float32).to(device)
     X_val = torch.tensor(val_embeddings, dtype=torch.float32).to(device) if val_embeddings is not None else None
     
+    M_str = _format_param_for_filename(M)
+    K_str = _format_param_for_filename(K)
+
     if checkpoint_dir is not None:
         os.makedirs(checkpoint_dir, exist_ok=True)
-        checkpoint_path = os.path.join(checkpoint_dir, f"SAE_M={M}_K={K}.pt")
+        checkpoint_path = os.path.join(checkpoint_dir, f"SAE_M={M_str}_K={K_str}.pt")
         if os.path.exists(checkpoint_path) and not overwrite_checkpoint:
             return load_model(checkpoint_path).to(device)
     
@@ -298,7 +307,7 @@ def generate_hypotheses(
         raise ValueError(f"n_selected_neurons ({n_selected_neurons}) can be at most the total number of neurons ({activations.shape[1]})")
     
     extra_args = {}
-    if selection_method == "correlation" and group_ids is not None:
+    if group_ids is not None:
         extra_args["group_ids"] = group_ids
 
     selected_neurons, scores = select_neurons(
@@ -307,7 +316,7 @@ def generate_hypotheses(
         n_select=n_selected_neurons,
         method=selection_method,
         classification=classification,
-        **extra_args
+        **extra_args 
     ) 
     
     print(f"\nStep 2: Interpreting selected neurons")
@@ -343,12 +352,10 @@ def generate_hypotheses(
         activations=activations,
         neuron_indices=selected_neurons,
         config=interpret_config,
-    )
+    ) 
 
-    # Prepare results dataframe
     results = []
     if n_scoring_examples == 0:
-        # Skip scoring entirely
         for idx, score in zip(selected_neurons, scores):
             results.append({
                 'neuron_idx': idx,
@@ -357,7 +364,7 @@ def generate_hypotheses(
                 'interpretation': interpretations[idx][0]
             })
     else:
-        print(f"\nStep 3: Scoring Interpretations")
+        print(f"\nStep 3: Scoring Interpretations") 
         scoring_config = ScoringConfig(n_examples=n_scoring_examples)
         metrics = interpreter.score_interpretations(
             texts=texts,
@@ -367,7 +374,6 @@ def generate_hypotheses(
         )
         
         for idx, score in zip(selected_neurons, scores):
-            # Find best interpretation and its score using max()
             best_interp = max(
                 interpretations[idx],
                 key=lambda interp: metrics[idx][interp][scoring_metric]
