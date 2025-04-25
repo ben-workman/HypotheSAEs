@@ -284,8 +284,20 @@ class SparseAutoencoder(nn.Module):
         
         if save_dir is not None:
             os.makedirs(save_dir, exist_ok=True)
-            self.save(os.path.join(save_dir, f'SAE_M={self.m_total_neurons}_K={self.k_active_neurons}.pt'))
-            
+
+            m_param = self.matryoshka_sizes if self.is_matryoshka else self.m_total_neurons
+
+            def _fmt(x):
+                if isinstance(x, (list, tuple, np.ndarray)):
+                    return "-".join(str(int(i)) for i in x)
+                return str(int(x))
+
+            m_str = _fmt(m_param)
+            k_str = _fmt(self.k_active_neurons)
+            filename = f"SAE_M={m_str}_K={k_str}.pt"
+
+            self.save(os.path.join(save_dir, filename))
+
         return history
 
     def get_activations(self, inputs, batch_size=16384):
