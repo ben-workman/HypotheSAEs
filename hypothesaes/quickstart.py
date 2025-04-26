@@ -369,10 +369,18 @@ def generate_hypotheses(
             results.append(row)
     else:
         scoring_config = ScoringConfig(n_examples=n_scoring_examples)
+        if filter:
+            scored_interpretations = {
+                idx: interpretations[idx]
+                for idx in interpretations
+                if neuron_relevance.get(idx, False)
+            }
+        else:
+            scored_interpretations = interpretations
         metrics = interpreter.score_interpretations(
             texts=texts,
             activations=activations,
-            interpretations=interpretations,
+            interpretations=scored_interpretations,
             config=scoring_config
         )
         for idx, score in zip(selected_neurons, scores):
@@ -385,7 +393,10 @@ def generate_hypotheses(
             }
             for j, interp in enumerate(interpretations[idx], start=1):
                 row[f'interpretation_{j}'] = interp
-                row[f'f1_score_{j}'] = metrics[idx][interp][scoring_metric]
+                if is_rel:
+                    row[f'f1_score_{j}'] = metrics[idx][interp][scoring_metric]
+                else:
+                    row[f'f1_score_{j}'] = None
             for j in range(len(interpretations[idx]) + 1, n_candidate_interpretations + 1):
                 row[f'interpretation_{j}'] = None
                 row[f'f1_score_{j}'] = None
