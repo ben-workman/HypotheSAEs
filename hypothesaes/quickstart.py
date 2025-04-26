@@ -237,7 +237,7 @@ def generate_hypotheses(
     embeddings: Union[List, np.ndarray],
     sae: Union[SparseAutoencoder, List[SparseAutoencoder]],
     cache_name: str,
-    group_ids: Optional[np.ndarray] = None, 
+    group_ids: Optional[np.ndarray] = None,
     *,
     classification: Optional[bool] = None,
     selection_method: str = "separation_score",
@@ -256,67 +256,33 @@ def generate_hypotheses(
     n_workers_annotation: int = 30,
     interpretation_sampling_function = "sample_top_zero",
     task_specific_instructions: Optional[str] = None,
-) -> Union[pd.DataFrame, Tuple[pd.DataFrame, np.ndarray]]:
-    """Generate interpretable hypotheses from text data using SAEs.
-    
-    Args:
-        texts: Input text examples
-        labels: Target labels (binary for classification, continuous for regression)
-        embeddings: Pre-computed embeddings for the input texts (list or numpy array)
-        sae: A single SAE or a list of SAEs
-        cache_name: String prefix for storing embedding/annotation caches
-        classification: Whether this is a classification task. If None, inferred from labels
-        selection_method: Method for selecting predictive neurons ('separation_score', 'correlation', 'lasso')
-        n_selected_neurons: Number of neurons to select and interpret
-        interpreter_model: LLM to use for generating interpretations
-        annotator_model: LLM to use for scoring interpretations
-        n_candidate_interpretations: Number of candidate interpretations per neuron
-        n_scoring_examples: Number of examples to use when scoring interpretations
-        scoring_metric: Metric to use for ranking interpretations ('f1', 'precision', 'recall', 'correlation')
-        task_specific_instructions: Optional task-specific instructions to include in the interpretation prompt
-
-    Returns:
-        DataFrame with columns: neuron_idx, target_{selection_method}, interpretation, interp_{scoring_metric}
-    """
+) -> pd.DataFrame:
     labels = np.array(labels)
     embeddings = np.array(embeddings)
     X = torch.tensor(embeddings, dtype=torch.float32).to(device)
-    
     if classification is None:
         classification = np.all(np.isin(np.random.choice(labels, size=1000, replace=True), [0, 1]))
-    
-    print(f"Embeddings shape: {embeddings.shape}")
-
     if not isinstance(sae, list):
         sae = [sae]
-    
     activations_list = []
     neuron_source_sae_info = []
     for s in sae:
         activations_list.append(s.get_activations(X))
         neuron_source_sae_info += [(s.m_total_neurons, s.k_active_neurons)] * s.m_total_neurons
     activations = np.concatenate(activations_list, axis=1)
-    
-    print(f"Activations shape (from {len(sae)} SAEs): {activations.shape}")
-
-    print(f"\nStep 1: Selecting top {n_selected_neurons} predictive neurons")
     if n_selected_neurons > activations.shape[1]:
-        raise ValueError(f"n_selected_neurons ({n_selected_neurons}) can be at most the total number of neurons ({activations.shape[1]})")
-    
+        raise ValueError(f"n_selected_neurons ({n_selected_neurons}) > total neurons ({activations.shape[1]})")
     extra_args = {}
     if group_ids is not None:
         extra_args["group_ids"] = group_ids
-
     selected_neurons, scores = select_neurons(
         activations=activations,
         target=labels,
         n_select=n_selected_neurons,
         method=selection_method,
         classification=classification,
-        **extra_args 
-    ) 
-    
-    print(f"\nStep 2: Interpreting selected neurons")
+        **extra_args
+    )
     interpreter = NeuronInterpreter(
         cache_name=cache_name,
         interpreter_model=interpreter_model,
@@ -324,17 +290,15 @@ def generate_hypotheses(
         n_workers_interpretation=n_workers_interpretation,
         n_workers_annotation=n_workers_annotation,
     )
-
     if interpretation_sampling_function == "sample_top_zero":
-        sampling_function = sample_top_zero 
-    elif interpretation_sampling_function == "sample_percentile_bins": 
-        sampling_function = sample_percentile_bins 
-
+        sampling_function = sample_top_zero
+    else:
+        sampling_function = sample_percentile_bins
     interpret_config = InterpretConfig(
         sampling=SamplingConfig(
             n_examples=n_examples_for_interpretation,
             max_words_per_example=max_words_per_example,
-            function = sampling_function 
+            function=sampling_function
         ),
         llm=LLMConfig(
             temperature=interpret_temperature,
@@ -343,16 +307,13 @@ def generate_hypotheses(
         n_candidates=n_candidate_interpretations,
         task_specific_instructions=task_specific_instructions,
     )
-
     interpretations = interpreter.interpret_neurons(
         texts=texts,
         activations=activations,
         neuron_indices=selected_neurons,
         config=interpret_config,
     )
-
-    client = openai.OpenAI(api_key=os.environ["OPENAI_KEY_SAE"]) 
-
+    client = openai.OpenAI(api_key=os.environ["OPENAI_KEY_SAE"])
     def mentions_relevant_feature(text: str) -> bool:
         user_prompt = (
             "Please review the following text and determine whether it describes a feature related to:\n"
@@ -372,11 +333,11 @@ def generate_hypotheses(
         )
         answer = response.choices[0].message.content.strip().lower()
         return answer.startswith("yes")
-
+    neuron_relevance: Dict[int, bool] = {}
     if filter:
         from concurrent.futures import ThreadPoolExecutor
         tasks = [(idx, interp) for idx, interp_list in interpretations.items() for interp in interp_list]
-        relevance_map = {}
+        relevance_map: Dict[int, Dict[str, bool]] = {}
         def _check(task):
             idx, text = task
             try:
@@ -384,38 +345,22 @@ def generate_hypotheses(
             except:
                 ok = False
             return idx, text, ok
-
         with ThreadPoolExecutor(max_workers=100) as executor:
             for idx, text, ok in executor.map(_check, tasks):
                 relevance_map.setdefault(idx, {})[text] = ok
-
         neuron_relevance = {idx: any(flags.values()) for idx, flags in relevance_map.items()}
-
-        for idx in list(interpretations):
-            flags = relevance_map.get(idx, {})
-            if not neuron_relevance.get(idx, False):
-                del interpretations[idx]
-            else:
-                interpretations[idx] = [interp for interp in interpretations[idx] if flags.get(interp, False)]
-
-        kept = [(idx, score) for idx, score in zip(selected_neurons, scores) if idx in interpretations]
-        if kept:
-            selected_neurons, scores = zip(*kept)
-        else:
-            selected_neurons, scores = [], []
-
     results = []
     if n_scoring_examples == 0:
         for idx, score in zip(selected_neurons, scores):
+            interp = interpretations[idx][0]
             results.append({
                 'neuron_idx': idx,
                 'source_sae': neuron_source_sae_info[idx],
                 f'target_{selection_method}': score,
-                'interpretation': interpretations[idx][0],
+                'interpretation': interp,
                 'mentions_relevant_feature': bool(filter and neuron_relevance.get(idx, False))
             })
     else:
-        print(f"\nStep 3: Scoring Interpretations") 
         scoring_config = ScoringConfig(n_examples=n_scoring_examples)
         metrics = interpreter.score_interpretations(
             texts=texts,
@@ -423,11 +368,17 @@ def generate_hypotheses(
             interpretations=interpretations,
             config=scoring_config
         )
-        
         for idx, score in zip(selected_neurons, scores):
-            best_interp = max(interpretations[idx], key=lambda interp: metrics[idx][interp][scoring_metric])
-            best_score = metrics[idx][best_interp][scoring_metric]
-            
+            is_rel = not filter or neuron_relevance.get(idx, False)
+            if is_rel:
+                best_interp = max(
+                    interpretations[idx],
+                    key=lambda interp: metrics[idx][interp][scoring_metric]
+                )
+                best_score = metrics[idx][best_interp][scoring_metric]
+            else:
+                best_interp = interpretations[idx][0]
+                best_score = np.nan
             results.append({
                 'neuron_idx': idx,
                 'source_sae': neuron_source_sae_info[idx],
@@ -436,9 +387,7 @@ def generate_hypotheses(
                 f'{scoring_metric}_fidelity_score': best_score,
                 'mentions_relevant_feature': bool(filter and neuron_relevance.get(idx, False))
             })
-
-    df = pd.DataFrame(results)
-    return df
+    return pd.DataFrame(results)
 
 def evaluate_hypotheses(
     hypotheses_df: pd.DataFrame,
