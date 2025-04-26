@@ -4,7 +4,7 @@ import numpy as np
 from typing import List, Dict, Optional, Tuple, Callable, Any
 from tqdm.auto import tqdm
 import concurrent.futures
-import os
+import os 
 from dataclasses import dataclass, field
 
 from .llm_api import get_completion

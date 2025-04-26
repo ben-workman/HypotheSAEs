@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from typing import List, Optional, Union, Tuple, Dict
 import torch
-import os
+import os, openai 
 from pathlib import Path
 import random
 
@@ -249,6 +249,7 @@ def generate_hypotheses(
     interpret_temperature: float = 0.7,
     max_interpretation_tokens: int = 50,
     n_candidate_interpretations: int = 1,
+    filter: bool = False,
     n_scoring_examples: int = 100,
     scoring_metric: str = "f1",
     n_workers_interpretation: int = 10,
@@ -277,7 +278,6 @@ def generate_hypotheses(
     Returns:
         DataFrame with columns: neuron_idx, target_{selection_method}, interpretation, interp_{scoring_metric}
     """
-    
     labels = np.array(labels)
     embeddings = np.array(embeddings)
     X = torch.tensor(embeddings, dtype=torch.float32).to(device)
@@ -287,11 +287,9 @@ def generate_hypotheses(
     
     print(f"Embeddings shape: {embeddings.shape}")
 
-    # Convert single SAE to list for consistent handling
     if not isinstance(sae, list):
         sae = [sae]
     
-    # Get activations from SAE(s)
     activations_list = []
     neuron_source_sae_info = []
     for s in sae:
@@ -351,7 +349,60 @@ def generate_hypotheses(
         activations=activations,
         neuron_indices=selected_neurons,
         config=interpret_config,
-    ) 
+    )
+
+    client = openai.OpenAI(api_key=os.environ["OPENAI_KEY_SAE"]) 
+
+    def mentions_relevant_feature(text: str) -> bool:
+        user_prompt = (
+            "Please review the following text and determine whether it describes a feature related to:\n"
+            "  1. Teacher or student behaviors (for example, working in teams),\n"
+            "  2. Speech patterns (such as the use of a specific word or phrase), or\n"
+            "  3. Aspects of a teacher's teaching style (e.g., calling on specific students).\n\n"
+            "In contrast, the text should NOT be describing specific mathematical concepts (like fractions or long division) "
+            "or physical classroom objects (such as boxes or windows). Note that while specific mathematical concepts should not be included, "
+            "more abstract features (e.g., debate about which mathematical strategy to use) should.\n\n"
+            "Answer with 'yes' if the text is about behaviors, speech, or teaching style, and 'no' otherwise. "
+            "If you are unsure, please default to 'yes.'\n\n"
+            f"Text: {text}"
+        )
+        response = client.beta.chat.completions.parse(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": user_prompt}]
+        )
+        answer = response.choices[0].message.content.strip().lower()
+        return answer.startswith("yes")
+
+    if filter:
+        from concurrent.futures import ThreadPoolExecutor
+        tasks = [(idx, interp) for idx, interp_list in interpretations.items() for interp in interp_list]
+        relevance_map = {}
+        def _check(task):
+            idx, text = task
+            try:
+                ok = mentions_relevant_feature(text)
+            except:
+                ok = False
+            return idx, text, ok
+
+        with ThreadPoolExecutor(max_workers=100) as executor:
+            for idx, text, ok in executor.map(_check, tasks):
+                relevance_map.setdefault(idx, {})[text] = ok
+
+        neuron_relevance = {idx: any(flags.values()) for idx, flags in relevance_map.items()}
+
+        for idx in list(interpretations):
+            flags = relevance_map.get(idx, {})
+            if not neuron_relevance.get(idx, False):
+                del interpretations[idx]
+            else:
+                interpretations[idx] = [interp for interp in interpretations[idx] if flags.get(interp, False)]
+
+        kept = [(idx, score) for idx, score in zip(selected_neurons, scores) if idx in interpretations]
+        if kept:
+            selected_neurons, scores = zip(*kept)
+        else:
+            selected_neurons, scores = [], []
 
     results = []
     if n_scoring_examples == 0:
@@ -360,7 +411,8 @@ def generate_hypotheses(
                 'neuron_idx': idx,
                 'source_sae': neuron_source_sae_info[idx],
                 f'target_{selection_method}': score,
-                'interpretation': interpretations[idx][0]
+                'interpretation': interpretations[idx][0],
+                'mentions_relevant_feature': bool(filter and neuron_relevance.get(idx, False))
             })
     else:
         print(f"\nStep 3: Scoring Interpretations") 
@@ -373,10 +425,7 @@ def generate_hypotheses(
         )
         
         for idx, score in zip(selected_neurons, scores):
-            best_interp = max(
-                interpretations[idx],
-                key=lambda interp: metrics[idx][interp][scoring_metric]
-            )
+            best_interp = max(interpretations[idx], key=lambda interp: metrics[idx][interp][scoring_metric])
             best_score = metrics[idx][best_interp][scoring_metric]
             
             results.append({
@@ -384,7 +433,8 @@ def generate_hypotheses(
                 'source_sae': neuron_source_sae_info[idx],
                 f'target_{selection_method}': score,
                 'interpretation': best_interp,
-                f'{scoring_metric}_fidelity_score': best_score
+                f'{scoring_metric}_fidelity_score': best_score,
+                'mentions_relevant_feature': bool(filter and neuron_relevance.get(idx, False))
             })
 
     df = pd.DataFrame(results)
