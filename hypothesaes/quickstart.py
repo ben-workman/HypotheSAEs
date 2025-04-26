@@ -356,14 +356,16 @@ def generate_hypotheses(
                 'neuron_idx': idx,
                 'source_sae': neuron_source_sae_info[idx],
                 f'target_{selection_method}': score,
-                'mentions_relevant_feature': bool(filter and neuron_relevance.get(idx, False))
+                'mentions_relevant_feature': bool(filter and neuron_relevance.get(idx, False)),
+                'best_interpretation': None,
+                f'{scoring_metric}_fidelity_score': None
             }
             for j, text in enumerate(interpretations[idx], start=1):
                 row[f'interpretation_{j}'] = text
+                row[f'f1_score_{j}'] = None
             for j in range(len(interpretations[idx]) + 1, n_candidate_interpretations + 1):
                 row[f'interpretation_{j}'] = None
-            row['best_interpretation'] = None
-            row[f'{scoring_metric}_fidelity_score'] = None
+                row[f'f1_score_{j}'] = None
             results.append(row)
     else:
         scoring_config = ScoringConfig(n_examples=n_scoring_examples)
@@ -381,18 +383,19 @@ def generate_hypotheses(
                 f'target_{selection_method}': score,
                 'mentions_relevant_feature': bool(filter and neuron_relevance.get(idx, False))
             }
-            for j, text in enumerate(interpretations[idx], start=1):
-                row[f'interpretation_{j}'] = text
+            for j, interp in enumerate(interpretations[idx], start=1):
+                row[f'interpretation_{j}'] = interp
+                row[f'f1_score_{j}'] = metrics[idx][interp][scoring_metric]
             for j in range(len(interpretations[idx]) + 1, n_candidate_interpretations + 1):
                 row[f'interpretation_{j}'] = None
+                row[f'f1_score_{j}'] = None
             if is_rel:
-                best_interp = max(
+                best = max(
                     interpretations[idx],
                     key=lambda interp: metrics[idx][interp][scoring_metric]
                 )
-                best_score = metrics[idx][best_interp][scoring_metric]
-                row['best_interpretation'] = best_interp
-                row[f'{scoring_metric}_fidelity_score'] = best_score
+                row['best_interpretation'] = best
+                row[f'{scoring_metric}_fidelity_score'] = metrics[idx][best][scoring_metric]
             else:
                 row['best_interpretation'] = None
                 row[f'{scoring_metric}_fidelity_score'] = None
