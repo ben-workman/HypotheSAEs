@@ -352,14 +352,19 @@ def generate_hypotheses(
     results = []
     if n_scoring_examples == 0:
         for idx, score in zip(selected_neurons, scores):
-            interp = interpretations[idx][0]
-            results.append({
+            row = {
                 'neuron_idx': idx,
                 'source_sae': neuron_source_sae_info[idx],
                 f'target_{selection_method}': score,
-                'interpretation': interp,
                 'mentions_relevant_feature': bool(filter and neuron_relevance.get(idx, False))
-            })
+            }
+            for j, text in enumerate(interpretations[idx], start=1):
+                row[f'interpretation_{j}'] = text
+            for j in range(len(interpretations[idx]) + 1, n_candidate_interpretations + 1):
+                row[f'interpretation_{j}'] = None
+            row['best_interpretation'] = None
+            row[f'{scoring_metric}_fidelity_score'] = None
+            results.append(row)
     else:
         scoring_config = ScoringConfig(n_examples=n_scoring_examples)
         metrics = interpreter.score_interpretations(
@@ -370,23 +375,28 @@ def generate_hypotheses(
         )
         for idx, score in zip(selected_neurons, scores):
             is_rel = not filter or neuron_relevance.get(idx, False)
+            row = {
+                'neuron_idx': idx,
+                'source_sae': neuron_source_sae_info[idx],
+                f'target_{selection_method}': score,
+                'mentions_relevant_feature': bool(filter and neuron_relevance.get(idx, False))
+            }
+            for j, text in enumerate(interpretations[idx], start=1):
+                row[f'interpretation_{j}'] = text
+            for j in range(len(interpretations[idx]) + 1, n_candidate_interpretations + 1):
+                row[f'interpretation_{j}'] = None
             if is_rel:
                 best_interp = max(
                     interpretations[idx],
                     key=lambda interp: metrics[idx][interp][scoring_metric]
                 )
                 best_score = metrics[idx][best_interp][scoring_metric]
+                row['best_interpretation'] = best_interp
+                row[f'{scoring_metric}_fidelity_score'] = best_score
             else:
-                best_interp = interpretations[idx][0]
-                best_score = np.nan
-            results.append({
-                'neuron_idx': idx,
-                'source_sae': neuron_source_sae_info[idx],
-                f'target_{selection_method}': score,
-                'interpretation': best_interp,
-                f'{scoring_metric}_fidelity_score': best_score,
-                'mentions_relevant_feature': bool(filter and neuron_relevance.get(idx, False))
-            })
+                row['best_interpretation'] = None
+                row[f'{scoring_metric}_fidelity_score'] = None
+            results.append(row)
     return pd.DataFrame(results)
 
 def evaluate_hypotheses(
