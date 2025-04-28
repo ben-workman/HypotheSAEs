@@ -2,7 +2,7 @@
 
 import numpy as np
 import pandas as pd
-from typing import List, Optional, Union, Tuple, Dict
+from typing import List, Optional, Union, Tuple, Dict, Callable, Any
 import torch
 import os, openai 
 from pathlib import Path
