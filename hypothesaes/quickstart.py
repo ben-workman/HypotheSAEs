@@ -254,9 +254,14 @@ def generate_hypotheses(
     scoring_metric: str = "f1",
     n_workers_interpretation: int = 10,
     n_workers_annotation: int = 30,
-    interpretation_sampling_function = "sample_top_zero",
+    interpretation_sampling_function: Callable = sample_top_zero,
+    interpretation_sampling_kwargs: Dict[str, Any] = None,
+    scoring_sampling_function: Callable = sample_top_zero,
+    scoring_sampling_kwargs: Dict[str, Any] = None,
     task_specific_instructions: Optional[str] = None,
 ) -> pd.DataFrame:
+    interpretation_sampling_kwargs = interpretation_sampling_kwargs or {}
+    scoring_sampling_kwargs = scoring_sampling_kwargs or {}
     labels = np.array(labels)
     embeddings = np.array(embeddings)
     X = torch.tensor(embeddings, dtype=torch.float32).to(device)
@@ -290,15 +295,13 @@ def generate_hypotheses(
         n_workers_interpretation=n_workers_interpretation,
         n_workers_annotation=n_workers_annotation,
     )
-    if interpretation_sampling_function == "sample_top_zero":
-        sampling_function = sample_top_zero
-    else:
-        sampling_function = sample_percentile_bins
+    sampling_function = interpretation_sampling_function
     interpret_config = InterpretConfig(
         sampling=SamplingConfig(
+            function=sampling_function,
             n_examples=n_examples_for_interpretation,
             max_words_per_example=max_words_per_example,
-            function=sampling_function
+            extra_kwargs=interpretation_sampling_kwargs,
         ),
         llm=LLMConfig(
             temperature=interpret_temperature,
@@ -368,7 +371,11 @@ def generate_hypotheses(
                 row[f'f1_score_{j}'] = None
             results.append(row)
     else:
-        scoring_config = ScoringConfig(n_examples=n_scoring_examples)
+        scoring_config = ScoringConfig(
+            n_examples=n_scoring_examples,
+            sampling_function=scoring_sampling_function,
+            sampling_kwargs=scoring_sampling_kwargs,
+        )
         if filter:
             scored_interpretations = {
                 idx: interpretations[idx]
