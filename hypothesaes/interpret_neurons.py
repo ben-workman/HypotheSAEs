@@ -25,7 +25,7 @@ def sample_top_zero(
     random_seed: Optional[int] = None
 ) -> Dict[str, List[str]]:
     """Sample top activating examples and random zero-activation examples for a given neuron."""
-    if random_seed is not None:
+    if random_seed is not None: 
         np.random.seed(random_seed)
         
     neuron_acts = activations[:, neuron_idx]
@@ -186,21 +186,19 @@ class NeuronInterpreter:
             **formatted_examples
         )
         
+        kwargs = {
+            "model": self.interpreter_model,
+            "prompt": prompt,
+            "max_tokens": config.llm.max_interpretation_tokens,
+            "timeout": config.llm.timeout
+        }
+
         if self.interpreter_model.startswith('o'):
-            response = get_completion(
-                prompt=prompt,
-                model=self.interpreter_model,
-                max_completion_tokens=config.llm.max_interpretation_tokens,
-                reasoning_effort='low'
-            )
+            kwargs["reasoning_effort"] = "low"
         else:
-            response = get_completion(
-                prompt=prompt,
-                model=self.interpreter_model,
-                temperature=config.llm.temperature,
-                max_tokens=config.llm.max_interpretation_tokens,
-                timeout=config.llm.timeout
-            )
+            kwargs["temperature"] = config.llm.temperature
+
+        response = get_completion(**kwargs)
         
         return self._parse_interpretation(response)
     
