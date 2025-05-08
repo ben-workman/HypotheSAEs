@@ -85,12 +85,11 @@ class SparseAutoencoder(nn.Module):
         matryoshka_recons = None
         if self.is_matryoshka and len(self.matryoshka_sizes) > 1:
             matryoshka_recons = {}
-            for m_i in self.matryoshka_sizes:
+            for m_i in self.matryoshka_sizes[:-1]:
                 partial_acts = activations.clone()
                 partial_acts[:, m_i:] = 0.0
-                partial_recon = self.decoder(partial_acts) + self.input_bias
-                matryoshka_recons[m_i] = partial_recon
-        
+                matryoshka_recons[m_i] = self.decoder(partial_acts) + self.input_bias
+            
         aux_values, aux_indices = None, None
         if self.aux_k is not None:
             dead_mask = (self.steps_since_activation > self.dead_neuron_threshold_steps).float()
