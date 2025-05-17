@@ -17,6 +17,16 @@ from .evaluation import score_hypotheses
 BASE_DIR = Path(__file__).parent.parent
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
 
+def set_seed(seed: int = 123):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark     = False
+
+
 def train_sae(
     embeddings: Union[list, np.ndarray],
     M: Union[int, list],  
@@ -60,15 +70,6 @@ def train_sae(
     Returns:
         Trained SparseAutoencoder model.
     """
-
-    seed = 123  
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
 
     embeddings = np.array(embeddings)
     input_dim = embeddings.shape[1]
@@ -239,7 +240,7 @@ def generate_hypotheses(
     cache_name: str,
     group_ids: Optional[np.ndarray] = None,
     *,
-    classification: Optional[bool] = None,
+    classification: Optional[bool] = None, 
     selection_method: str = "separation_score",
     n_selected_neurons: int = 20,
     interpreter_model: str = "gpt-4o",
@@ -320,12 +321,12 @@ def generate_hypotheses(
     def mentions_relevant_feature(text: str) -> bool:
         user_prompt = (
             "Please review the following text and determine whether it describes a feature related to:\n"
-            "  1. Teacher or student behaviors (for example, working in teams),\n"
+            "  1. Teacher or student behaviors (for example, working in teams or going to the bathroom),\n"
             "  2. Speech patterns (such as the use of a specific word or phrase), or\n"
-            "  3. Aspects of a teacher's teaching style (e.g., calling on specific students).\n\n"
+            "  3. Aspects of a teacher's teaching style (e.g., calling on students or a specific method of teaching a mathematical concept).\n\n"
             "In contrast, the text should NOT be describing specific mathematical concepts (like fractions or long division) "
-            "or physical classroom objects (such as boxes or windows). Note that while specific mathematical concepts should not be included, "
-            "more abstract features (e.g., debate about which mathematical strategy to use) should.\n\n"
+            "or physical classroom objects (such as boxes or windows). Importantly, while specific mathematical concepts (e.g., fractions) should not be included, "
+            "more abstract features (e.g., use of a particular mathematical strategy) should.\n\n"
             "Answer with 'yes' if the text is about behaviors, speech, or teaching style, and 'no' otherwise. "
             "If you are unsure, please default to 'yes.'\n\n"
             f"Text: {text}"
