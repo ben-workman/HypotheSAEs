@@ -320,12 +320,12 @@ def generate_hypotheses(
     def mentions_relevant_feature(text: str) -> bool:
         user_prompt = (
             "Please review the following text and determine whether it describes a feature related to:\n"
-            "  1. Teacher or student behaviors (for example, working in teams or going to the bathroom),\n"
+            "  1. Teacher or student behaviors (for example, working in teams),\n"
             "  2. Speech patterns (such as the use of a specific word or phrase), or\n"
-            "  3. Aspects of a teacher's teaching style (e.g., calling on students or a specific method of teaching a mathematical concept).\n\n"
+            "  3. Aspects of a teacher's teaching style (e.g., calling on specific students).\n\n"
             "In contrast, the text should NOT be describing specific mathematical concepts (like fractions or long division) "
-            "or physical classroom objects (such as boxes or windows). Importantly, while specific mathematical concepts (e.g., fractions) should not be included, "
-            "more abstract features (e.g., use of a particular mathematical strategy) should.\n\n"
+            "or physical classroom objects (such as boxes or windows). Note that while specific mathematical concepts should not be included, "
+            "more abstract features (e.g., debate about which mathematical strategy to use) should.\n\n"
             "Answer with 'yes' if the text is about behaviors, speech, or teaching style, and 'no' otherwise. "
             "If you are unsure, please default to 'yes.'\n\n"
             f"Text: {text}"
