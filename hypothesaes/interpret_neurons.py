@@ -221,16 +221,19 @@ class NeuronInterpreter:
         config: InterpretConfig
     ) -> str:
         """Generate interpretation for a single neuron."""
+        sampling_kwargs = dict(config.sampling.extra_kwargs)
+        if config.sampling.random_seed is not None:
+            sampling_kwargs.setdefault("random_seed", config.sampling.random_seed)
+
         formatted_examples = config.sampling.function(
             texts=texts,
             activations=activations,
             neuron_idx=neuron_idx,
             n_examples=config.sampling.n_examples,
             max_words_per_example=config.sampling.max_words_per_example,
-            random_seed=config.sampling.random_seed,
-            **config.sampling.extra_kwargs
+            **sampling_kwargs
         )
-        
+
         prompt_template = load_prompt(config.prompt_name)
         return self._get_interpretation_completion(
             prompt_template=prompt_template,

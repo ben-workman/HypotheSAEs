@@ -26,7 +26,6 @@ def set_seed(seed: int = 123):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark     = False
 
-
 def train_sae(
     embeddings: Union[list, np.ndarray],
     M: Union[int, list],  
