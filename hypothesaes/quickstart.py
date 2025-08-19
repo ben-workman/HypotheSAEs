@@ -331,7 +331,7 @@ def generate_hypotheses(
             f"Text: {text}"
         )
         response = client.beta.chat.completions.parse(
-            model="o4-mini",
+            model="gpt-5",
             messages=[{"role": "user", "content": user_prompt}]
         )
         answer = response.choices[0].message.content.strip().lower()
