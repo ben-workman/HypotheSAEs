@@ -1,9 +1,5 @@
 import os, time
 from openai import OpenAI
-from openai import (
-    APITimeoutError, APIConnectionError, RateLimitError,
-    AuthenticationError, PermissionDeniedError, NotFoundError, BadRequestError, APIError
-)
 
 model_abbrev_to_id = {
     'gpt4': 'gpt-4-0125-preview',
@@ -15,50 +11,50 @@ model_abbrev_to_id = {
 }
 
 def get_client():
-    api_key = os.environ.get("OPENAI_KEY_SAE") or os.environ.get("OPENAI_API_KEY")
+    api_key = os.environ.get('OPENAI_KEY_SAE') or os.environ.get('OPENAI_API_KEY')
     if not api_key:
         raise ValueError("Set OPENAI_KEY_SAE or OPENAI_API_KEY")
-    org     = os.environ.get("OPENAI_ORG_ID") or os.environ.get("OPENAI_ORGANIZATION")
-    project = os.environ.get("OPENAI_PROJECT_ID") or os.environ.get("OPENAI_PROJECT")
-    return OpenAI(api_key=api_key, organization=org, project=project)
+    return OpenAI(api_key=api_key)
 
-def get_completion(
-    prompt: str,
-    model: str = "gpt-4o",
-    timeout: float = 60.0,
-    max_retries: int = 3,
-    backoff_factor: float = 2.0,
-    **kwargs
-) -> str:
-    client  = get_client()
+def _is_responses_model(model_id: str) -> bool:
+    m = model_id.lower()
+    return m.startswith(("o", "gpt-4.1", "gpt-5"))
+
+def get_completion(prompt: str, model: str = "gpt-4o",
+                   timeout: float = 15.0, max_retries: int = 3, backoff_factor: float = 2.0, **kwargs) -> str:
+    client = get_client()
     model_id = model_abbrev_to_id.get(model, model)
-    client_t = client.with_options(timeout=timeout)
-    is_o_series = model_id.startswith("o")
 
     for attempt in range(max_retries):
         try:
-            if is_o_series:
-                kwargs_resp = dict(kwargs)
-                if "max_tokens" in kwargs_resp:
-                    kwargs_resp["max_output_tokens"] = kwargs_resp.pop("max_tokens")
-                kwargs_resp.pop("temperature", None)
-                resp = client_t.responses.create(model=model_id, input=prompt, **kwargs_resp)
+            if _is_responses_model(model_id):
+                mct = kwargs.pop("max_completion_tokens", None)
+                if mct is None and "max_tokens" in kwargs:
+                    mct = kwargs.pop("max_tokens")
+                kwargs.pop("temperature", None)
+                if mct is not None:
+                    resp = client.responses.create(model=model_id, input=prompt,
+                                                   max_completion_tokens=mct, timeout=timeout, **kwargs)
+                else:
+                    resp = client.responses.create(model=model_id, input=prompt,
+                                                   timeout=timeout, **kwargs)
                 return resp.output_text
             else:
-                resp = client_t.chat.completions.create(
-                    model=model_id,
-                    messages=[{"role": "user", "content": prompt}],
-                    **kwargs
-                )
+                mt = kwargs.pop("max_tokens", None)
+                if mt is None and "max_completion_tokens" in kwargs:
+                    mt = kwargs.pop("max_completion_tokens")
+                if mt is not None:
+                    resp = client.chat.completions.create(model=model_id,
+                                                          messages=[{"role": "user", "content": prompt}],
+                                                          max_tokens=mt, timeout=timeout, **kwargs)
+                else:
+                    resp = client.chat.completions.create(model=model_id,
+                                                          messages=[{"role": "user", "content": prompt}],
+                                                          timeout=timeout, **kwargs)
                 return resp.choices[0].message.content
-
-        except (APITimeoutError, APIConnectionError, RateLimitError) as e:
+        except Exception:
             if attempt == max_retries - 1:
                 raise
             wait = timeout * (backoff_factor ** attempt)
-            print(f"{type(e).__name__}: retrying in {wait:.1f}s... ({attempt+1}/{max_retries})")
+            print(f"API timeout, retrying in {wait:.1f}s... ({attempt + 1}/{max_retries})")
             time.sleep(wait)
-
-        except (AuthenticationError, PermissionDeniedError, NotFoundError, BadRequestError, APIError) as e:
-            print(f"OpenAI {type(e).__name__}: {e}")
-            raise
