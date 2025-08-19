@@ -55,7 +55,8 @@ class SparseAutoencoder(nn.Module):
 
         self.to(device)
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Dict]:
+    def forward(self, x: torch.Tensor, track_dead: bool = True) -> Tuple[torch.Tensor, Dict]:
+
         """
         If self.is_matryoshka is True, we will produce multiple partial reconstructions,
         one for each dictionary size in self.matryoshka_sizes. 
@@ -76,8 +77,9 @@ class SparseAutoencoder(nn.Module):
         multik_activations = torch.zeros_like(pre_act)
         multik_activations.scatter_(-1, multik_indices, multik_values)
         
-        self.steps_since_activation += 1
-        self.steps_since_activation.scatter_(0, topk_indices.unique(), 0)
+        if track_dead:
+            self.steps_since_activation += 1
+            self.steps_since_activation.scatter_(0, topk_indices.unique(), 0)
         
         reconstruction = self.decoder(activations) + self.input_bias
         multik_reconstruction = self.decoder(multik_activations) + self.input_bias
@@ -212,8 +214,17 @@ class SparseAutoencoder(nn.Module):
         clip_grad: float = 1.0
     ) -> Dict:
         """Train the sparse autoencoder."""
-        
-        train_loader = DataLoader(TensorDataset(X_train), batch_size=batch_size, shuffle=True)
+
+        g = torch.Generator(device='cpu')
+        g.manual_seed(torch.initial_seed())
+
+        train_loader = DataLoader(
+            TensorDataset(X_train),
+            batch_size=batch_size,
+            shuffle=True,
+            generator=g         
+        )
+
         val_loader = None
         if X_val is not None:
             val_loader = DataLoader(TensorDataset(X_val), batch_size=batch_size)
@@ -256,11 +267,11 @@ class SparseAutoencoder(nn.Module):
                 self.eval()
                 val_losses = []
                 with torch.no_grad():
-                    for batch_x, in val_loader:
-                        batch_x = batch_x.to(device)
-                        recon, info = self(batch_x)
-                        val_loss = self.compute_loss(batch_x, recon, info, aux_coef, multi_coef)
-                        val_losses.append(val_loss.item())
+                for batch_x, in val_loader:
+                    batch_x = batch_x.to(device)
+                    recon, info = self(batch_x, track_dead=False)  
+                    val_loss = self.compute_loss(batch_x, recon, info, aux_coef, multi_coef)
+                    val_losses.append(val_loss.item())
                 
                 avg_val_loss = np.mean(val_losses)
                 history['val_loss'].append(avg_val_loss)
@@ -314,9 +325,9 @@ class SparseAutoencoder(nn.Module):
         all_activations = []
         
         with torch.no_grad():
-            for i in tqdm(range(0, num_samples, batch_size), desc=f"Computing activations (batchsize={batch_size})"):
+            for i in range(0, num_samples, batch_size):
                 batch = inputs[i:i+batch_size]
-                _, info = self(batch)
+                _, info = self(batch, track_dead=False)  
                 all_activations.append(info['activations'].cpu())
         
         return torch.cat(all_activations, dim=0).numpy()
