@@ -18,39 +18,44 @@ def get_client():
 
 def _is_responses_model(model_id: str) -> bool:
     m = model_id.lower()
-    return m.startswith(("o", "gpt-4.1", "gpt-5"))
+    # Responses for o* and gpt-4.1*; keep gpt-5 on Chat Completions
+    return m.startswith("o") or m.startswith("gpt-4.1")
 
-def get_completion(prompt: str, model: str = "gpt-4o",
-                   timeout: float = 15.0, max_retries: int = 3, backoff_factor: float = 2.0, **kwargs) -> str:
+def get_completion(
+    prompt: str,
+    model: str = "gpt-4o",
+    timeout: float = 15.0,
+    max_retries: int = 3,
+    backoff_factor: float = 2.0,
+    **kwargs
+) -> str:
     client = get_client()
     model_id = model_abbrev_to_id.get(model, model)
-
     for attempt in range(max_retries):
         try:
             if _is_responses_model(model_id):
                 mct = kwargs.pop("max_completion_tokens", None)
                 if mct is None and "max_tokens" in kwargs:
                     mct = kwargs.pop("max_tokens")
-                kwargs.pop("temperature", None)
-                if mct is not None:
-                    resp = client.responses.create(model=model_id, input=prompt,
-                                                   max_completion_tokens=mct, timeout=timeout, **kwargs)
-                else:
-                    resp = client.responses.create(model=model_id, input=prompt,
-                                                   timeout=timeout, **kwargs)
+                resp = client.responses.create(
+                    model=model_id,
+                    input=[{"role": "user", "content": prompt}],
+                    max_completion_tokens=mct,
+                    timeout=timeout,
+                    **kwargs
+                )
                 return resp.output_text
             else:
                 mt = kwargs.pop("max_tokens", None)
                 if mt is None and "max_completion_tokens" in kwargs:
                     mt = kwargs.pop("max_completion_tokens")
-                if mt is not None:
-                    resp = client.chat.completions.create(model=model_id,
-                                                          messages=[{"role": "user", "content": prompt}],
-                                                          max_tokens=mt, timeout=timeout, **kwargs)
-                else:
-                    resp = client.chat.completions.create(model=model_id,
-                                                          messages=[{"role": "user", "content": prompt}],
-                                                          timeout=timeout, **kwargs)
+                resp = client.chat.completions.create(
+                    model=model_id,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=mt,
+                    timeout=timeout,
+                    **kwargs
+                )
                 return resp.choices[0].message.content
         except Exception:
             if attempt == max_retries - 1:
