@@ -215,15 +215,7 @@ class SparseAutoencoder(nn.Module):
     ) -> Dict:
         """Train the sparse autoencoder."""
 
-        g = torch.Generator(device='cpu')
-        g.manual_seed(torch.initial_seed())
-
-        train_loader = DataLoader(
-            TensorDataset(X_train),
-            batch_size=batch_size,
-            shuffle=True,
-            generator=g         
-        )
+        train_loader = DataLoader(TensorDataset(X_train), batch_size=batch_size, shuffle=True)
 
         val_loader = None
         if X_val is not None:
