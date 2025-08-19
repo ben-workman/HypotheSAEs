@@ -10,11 +10,13 @@ model_abbrev_to_id = {
     'gpt-4o-mini': 'gpt-4o-mini-2024-07-18',
 }
 
+CHAT_PASS = {'temperature','top_p','n','stop','presence_penalty','frequency_penalty','logit_bias','user','seed','store','metadata'}
+RESP_PASS = {'reasoning_effort','metadata','seed','store','tool_choice','parallel_tool_calls'}
+
 def get_client():
-    api_key = os.environ.get('OPENAI_KEY_SAE') or os.environ.get('OPENAI_API_KEY')
-    if not api_key:
-        raise ValueError("Set OPENAI_KEY_SAE or OPENAI_API_KEY")
-    return OpenAI(api_key=api_key)
+    k = os.environ.get('OPENAI_KEY_SAE') or os.environ.get('OPENAI_API_KEY')
+    if not k: raise ValueError("Set OPENAI_KEY_SAE or OPENAI_API_KEY")
+    return OpenAI(api_key=k)
 
 def _is_responses_model(m: str) -> bool:
     ml = m.lower()
@@ -25,20 +27,31 @@ def get_completion(prompt: str, model: str = "gpt-4o", timeout: float = 15.0, ma
     model_id = model_abbrev_to_id.get(model, model)
     for attempt in range(max_retries):
         try:
+            kw = dict(kwargs)
             if model_id.lower().startswith("gpt-5"):
-                kwargs.pop("max_tokens", None)
-                kwargs.pop("max_completion_tokens", None)
-                kwargs.pop("max_output_tokens", None)
-                resp = client.chat.completions.create(model=model_id, messages=[{"role":"user","content":prompt}], timeout=timeout, **kwargs)
+                kw.pop("temperature", None)
+                kw.pop("reasoning_effort", None)
+                kw.pop("max_tokens", None)
+                kw.pop("max_output_tokens", None)
+                kw.pop("max_completion_tokens", None)
+                ckw = {k:v for k,v in kw.items() if k in CHAT_PASS}
+                resp = client.chat.completions.create(model=model_id, messages=[{"role":"user","content":prompt}], timeout=timeout, **ckw)
                 return resp.choices[0].message.content
+
             if _is_responses_model(model_id):
-                mct = kwargs.pop("max_output_tokens", None) or kwargs.pop("max_completion_tokens", None) or kwargs.pop("max_tokens", None)
-                resp = client.responses.create(model=model_id, input=prompt, max_output_tokens=mct, timeout=timeout, **kwargs)
+                kw.pop("temperature", None)
+                mct = kw.pop("max_output_tokens", None) or kw.pop("max_completion_tokens", None) or kw.pop("max_tokens", None)
+                rkw = {k:v for k,v in kw.items() if k in RESP_PASS}
+                resp = client.responses.create(model=model_id, input=prompt, max_output_tokens=mct, timeout=timeout, **rkw)
                 return resp.output_text
-            mt = kwargs.pop("max_tokens", None) or kwargs.pop("max_output_tokens", None) or kwargs.pop("max_completion_tokens", None)
-            resp = client.chat.completions.create(model=model_id, messages=[{"role":"user","content":prompt}], max_tokens=mt, timeout=timeout, **kwargs)
+
+            mt = kw.pop("max_tokens", None) or kw.pop("max_output_tokens", None) or kw.pop("max_completion_tokens", None)
+            kw.pop("reasoning_effort", None)
+            ckw = {k:v for k,v in kw.items() if k in CHAT_PASS}
+            resp = client.chat.completions.create(model=model_id, messages=[{"role":"user","content":prompt}], max_tokens=mt, timeout=timeout, **ckw)
             return resp.choices[0].message.content
-        except Exception as e:
+
+        except Exception:
             if attempt == max_retries - 1:
                 raise
             wait = timeout * (backoff_factor ** attempt)
