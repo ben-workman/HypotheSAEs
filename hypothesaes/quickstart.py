@@ -306,6 +306,7 @@ def generate_hypotheses(
         llm=LLMConfig(
             temperature=interpret_temperature,
             max_interpretation_tokens=max_interpretation_tokens,
+            timeout=120
         ),
         n_candidates=n_candidate_interpretations,
         task_specific_instructions=task_specific_instructions,
