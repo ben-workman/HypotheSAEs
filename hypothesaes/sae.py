@@ -267,11 +267,11 @@ class SparseAutoencoder(nn.Module):
                 self.eval()
                 val_losses = []
                 with torch.no_grad():
-                for batch_x, in val_loader:
-                    batch_x = batch_x.to(device)
-                    recon, info = self(batch_x, track_dead=False)  
-                    val_loss = self.compute_loss(batch_x, recon, info, aux_coef, multi_coef)
-                    val_losses.append(val_loss.item())
+                    for batch_x, in val_loader:
+                        batch_x = batch_x.to(device)
+                        recon, info = self(batch_x, track_dead=False)  
+                        val_loss = self.compute_loss(batch_x, recon, info, aux_coef, multi_coef)
+                        val_losses.append(val_loss.item())
                 
                 avg_val_loss = np.mean(val_losses)
                 history['val_loss'].append(avg_val_loss)
