@@ -1,15 +1,10 @@
-"""LLM API utilities for HypotheSAEs."""
+import os, time
+from openai import OpenAI
+from openai import (
+    APITimeoutError, APIConnectionError, RateLimitError,
+    AuthenticationError, PermissionDeniedError, NotFoundError, BadRequestError, APIError
+)
 
-import os
-import time
-import openai
-
-"""
-These model IDs point to the latest versions of the models as of 2025-03-12.
-We point to a specific version for reproducibility, but feel free to update them as necessary.
-Note that o1, o1-mini, o3-mini are also supported by get_completion().
-We don't point these models to a specific version, so passing in these model names will use the latest version.
-"""
 model_abbrev_to_id = {
     'gpt4': 'gpt-4-0125-preview',
     'gpt-4': 'gpt-4-0125-preview',
@@ -20,55 +15,50 @@ model_abbrev_to_id = {
 }
 
 def get_client():
-    """Get the OpenAI client, initializing it if necessary."""
-    api_key = os.environ.get('OPENAI_KEY_SAE')
-    if api_key is None or '...' in api_key:
-        raise ValueError("Please set the OPENAI_KEY_SAE environment variable before using functions which require the OpenAI API.")
-    
-    return openai.OpenAI(api_key=api_key)
+    api_key = os.environ.get("OPENAI_KEY_SAE") or os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("Set OPENAI_KEY_SAE or OPENAI_API_KEY")
+    org     = os.environ.get("OPENAI_ORG_ID") or os.environ.get("OPENAI_ORGANIZATION")
+    project = os.environ.get("OPENAI_PROJECT_ID") or os.environ.get("OPENAI_PROJECT")
+    return OpenAI(api_key=api_key, organization=org, project=project)
 
 def get_completion(
     prompt: str,
     model: str = "gpt-4o",
-    timeout: float = 15.0,
+    timeout: float = 60.0,
     max_retries: int = 3,
     backoff_factor: float = 2.0,
     **kwargs
 ) -> str:
-    """
-    Get completion from OpenAI API with retry logic and timeout.
-    
-    Args:
-        prompt: The prompt to send
-        model: Model to use
-        max_retries: Maximum number of retries on rate limit
-        backoff_factor: Factor to multiply backoff time by after each retry
-        request_timeout: Timeout for the request
-        **kwargs: Additional arguments to pass to the OpenAI API; max_tokens, temperature, etc.
-    Returns:
-        Generated completion text
-    
-    Raises:
-        Exception: If all retries fail
-    """
-    client = get_client()
+    client  = get_client()
     model_id = model_abbrev_to_id.get(model, model)
-    
+    client_t = client.with_options(timeout=timeout)
+    is_o_series = model_id.startswith("o")
+
     for attempt in range(max_retries):
         try:
-            response = client.chat.completions.create(
-                model=model_id,
-                messages=[{"role": "user", "content": prompt}],
-                timeout=timeout,
-                **kwargs
-            )
-            return response.choices[0].message.content
-            
-        except Exception as e:
-            if attempt == max_retries - 1:  # Last attempt
-                raise e
-            
-            # Exponential backoff
-            wait_time = timeout * (backoff_factor ** attempt)
-            print(f"API timeout, retrying in {wait_time:.1f}s... ({attempt + 1}/{max_retries})")
-            time.sleep(wait_time)
+            if is_o_series:
+                kwargs_resp = dict(kwargs)
+                if "max_tokens" in kwargs_resp:
+                    kwargs_resp["max_output_tokens"] = kwargs_resp.pop("max_tokens")
+                kwargs_resp.pop("temperature", None)
+                resp = client_t.responses.create(model=model_id, input=prompt, **kwargs_resp)
+                return resp.output_text
+            else:
+                resp = client_t.chat.completions.create(
+                    model=model_id,
+                    messages=[{"role": "user", "content": prompt}],
+                    **kwargs
+                )
+                return resp.choices[0].message.content
+
+        except (APITimeoutError, APIConnectionError, RateLimitError) as e:
+            if attempt == max_retries - 1:
+                raise
+            wait = timeout * (backoff_factor ** attempt)
+            print(f"{type(e).__name__}: retrying in {wait:.1f}s... ({attempt+1}/{max_retries})")
+            time.sleep(wait)
+
+        except (AuthenticationError, PermissionDeniedError, NotFoundError, BadRequestError, APIError) as e:
+            print(f"OpenAI {type(e).__name__}: {e}")
+            raise
