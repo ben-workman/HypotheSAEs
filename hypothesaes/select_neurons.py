@@ -3,8 +3,7 @@
 import time
 import numpy as np
 from typing import List, Optional, Callable, Tuple
-from sklearn.linear_model import Lasso, LogisticRegression, lasso_path, logistic_regression_path
-from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import Lasso, LogisticRegression, lasso_path 
 from scipy.stats import pearsonr
 
 
@@ -207,57 +206,63 @@ def select_neurons_presence_correlation(
 def select_neurons_stability(
     activations: np.ndarray,
     target: np.ndarray,
-    n_select: int,
-    classification: bool = False,
+    n_select: int = 0,
+    *,
     group_ids: Optional[np.ndarray] = None,
     n_bootstrap: int = 100,
     sample_fraction: float = 0.5,
-    alphas: Optional[np.ndarray] = None,
-    Cs: Optional[np.ndarray] = None,
-    pi_threshold: Optional[float] = None,
-    max_iter: int = 1000,
-    random_state: Optional[int] = 0,
-    scale: bool = True,
-    verbose: bool = False,
+    pi_threshold: float = 0.7,
+    random_state: Optional[int] = None,
+    n_alphas: int = 100,
+    eps: float = 1e-3,
+    standardize: bool = True,
+    group_subsample: bool = True,
 ) -> Tuple[List[int], List[float]]:
+    rng = np.random.RandomState(random_state)
     X = activations
-    y = target
-    if group_ids is not None:
-        u = np.unique(group_ids)
-        X = np.vstack([activations[group_ids == g].mean(axis=0) for g in u])
-        y = np.array([target[group_ids == g].mean() for g in u])
-    if scale:
+    y = target.astype(float)
+
+    if standardize:
         scaler = StandardScaler()
         X = scaler.fit_transform(X)
-    rng = np.random.RandomState(random_state)
+        y = (y - y.mean()) / (y.std() + 1e-12)
+
     n, p = X.shape
-    m = max(1, int(np.floor(sample_fraction * n)))
-    counts = np.zeros(p, dtype=np.int32)
-    for b in range(n_bootstrap):
-        idx = rng.choice(n, size=m, replace=False)
+    sel_counts = np.zeros(p, dtype=float)
+
+    if group_ids is not None and group_subsample:
+        groups = np.asarray(group_ids)
+        uniq = np.unique(groups)
+        g = len(uniq)
+        take_g = max(1, int(np.ceil(sample_fraction * g)))
+
+    for _ in range(n_bootstrap):
+        if group_ids is not None and group_subsample:
+            chosen_groups = rng.choice(uniq, size=take_g, replace=False)
+            idx = np.isin(groups, chosen_groups).nonzero()[0]
+        else:
+            take_n = max(1, int(np.ceil(sample_fraction * n)))
+            idx = rng.choice(n, size=take_n, replace=False)
+
         Xb = X[idx]
         yb = y[idx]
-        if classification:
-            if Cs is None:
-                Cs = np.logspace(-2, 2, 20)
-            _, coefs, _ = logistic_regression_path(Xb, yb, Cs=Cs, penalty="l1", solver="liblinear", max_iter=max_iter)
-            if coefs.ndim == 3:
-                sel = (np.abs(coefs).sum(axis=0) > 0).any(axis=1)
-            else:
-                sel = (np.abs(coefs) > 0).any(axis=1)
-        else:
-            _, _, coefs = lasso_path(Xb, yb, alphas=alphas, max_iter=max_iter)
-            sel = (np.abs(coefs) > 0).any(axis=1)
-        counts += sel.astype(np.int32)
-        if verbose and (b + 1) % max(1, n_bootstrap // 10) == 0:
-            pass
-    stability = counts.astype(float) / float(n_bootstrap)
-    if pi_threshold is not None:
-        idxs = np.where(stability >= pi_threshold)[0]
-        scores = stability[idxs]
-        return idxs.tolist(), scores.tolist()
-    order = np.argsort(-stability)[:n_select]
-    return order.tolist(), stability[order].tolist()
+
+        alphas, coefs, _ = lasso_path(
+            Xb, yb, n_alphas=n_alphas, eps=eps, fit_intercept=False, copy_X=False
+        )
+        support_any = (coefs != 0).any(axis=1)
+        sel_counts += support_any.astype(float)
+
+    pi = sel_counts / n_bootstrap
+    selected = np.where(pi >= pi_threshold)[0]
+
+    if selected.size == 0:
+        selected = np.array([int(np.argmax(pi))])
+
+    order = np.argsort(-pi[selected])
+    final_idx = selected[order].tolist()
+    final_scores = pi[selected][order].tolist()
+    return final_idx, final_scores
 
 def select_neurons(
     activations: np.ndarray,
@@ -267,53 +272,21 @@ def select_neurons(
     classification: bool = False,
     **kwargs
 ) -> Tuple[List[int], List[float]]:
-    if classification and len(np.unique(target)) > 2:
+    if classification and len(np.unique(target)) > 2 and method != "stability":
         raise ValueError("classification=True, but the target variable has more than 2 classes")
     if method == "lasso":
-        return select_neurons_lasso(
-            activations=activations,
-            target=target,
-            n_select=n_select,
-            classification=classification,
-            **kwargs
-        )
+        return select_neurons_lasso(activations=activations, target=target, n_select=n_select, classification=classification, **kwargs)
     elif method == "correlation":
-        return select_neurons_correlation(
-            activations=activations,
-            target=target,
-            n_select=n_select,
-            **kwargs
-        )
+        return select_neurons_correlation(activations=activations, target=target, n_select=n_select, **kwargs)
     elif method == "separation_score":
-        return select_neurons_separation_score(
-            activations=activations,
-            target=target,
-            n_select=n_select,
-            **kwargs
-        )
+        return select_neurons_separation_score(activations=activations, target=target, n_select=n_select, **kwargs)
     elif method == "presence_correlation":
-        return select_neurons_presence_correlation(
-            activations=activations,
-            target=target,
-            n_select=n_select,
-            group_ids=kwargs.get("group_ids", None)
-        )
+        return select_neurons_presence_correlation(activations=activations, target=target, n_select=n_select, group_ids=kwargs.get("group_ids", None))
     elif method == "custom":
         if "metric_fn" not in kwargs:
             raise ValueError("Must provide metric_fn for custom method")
-        return select_neurons_custom(
-            activations=activations,
-            target=target,
-            n_select=n_select,
-            **kwargs
-        )
+        return select_neurons_custom(activations=activations, target=target, n_select=n_select, **kwargs)
     elif method == "stability":
-        return select_neurons_stability(
-            activations=activations,
-            target=target,
-            n_select=n_select,
-            classification=classification,
-            **kwargs
-        )
+        return select_neurons_stability(activations=activations, target=target, n_select=n_select, **kwargs)
     else:
         raise ValueError(f"Unknown selection method: {method}")

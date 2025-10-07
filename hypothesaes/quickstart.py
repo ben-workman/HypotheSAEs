@@ -259,13 +259,14 @@ def generate_hypotheses(
     scoring_sampling_function: Callable = sample_top_zero,
     scoring_sampling_kwargs: Dict[str, Any] = None,
     task_specific_instructions: Optional[str] = None,
-    stability_pi_threshold: Optional[float] = None,
     stability_n_bootstrap: int = 100,
     stability_sample_fraction: float = 0.5,
-    stability_alphas: Optional[np.ndarray] = None,
-    stability_Cs: Optional[np.ndarray] = None,
-    stability_max_iter: int = 1000,
-    stability_random_state: Optional[int] = 0,
+    stability_pi_threshold: float = 0.7,
+    stability_random_state: Optional[int] = None,
+    stability_n_alphas: int = 100,
+    stability_eps: float = 1e-3,
+    stability_standardize: bool = True,
+    stability_group_subsample: bool = True,
 ) -> pd.DataFrame:
     interpretation_sampling_kwargs = interpretation_sampling_kwargs or {}
     scoring_sampling_kwargs = scoring_sampling_kwargs or {}
@@ -282,24 +283,24 @@ def generate_hypotheses(
         activations_list.append(s.get_activations(X))
         neuron_source_sae_info += [(s.m_total_neurons, s.k_active_neurons)] * s.m_total_neurons
     activations = np.concatenate(activations_list, axis=1)
-    if not (selection_method == "stability" and stability_pi_threshold is not None):
-        if n_selected_neurons > activations.shape[1]:
-            raise ValueError(f"n_selected_neurons ({n_selected_neurons}) > total neurons ({activations.shape[1]})")
+    if selection_method != "stability" and n_selected_neurons > activations.shape[1]:
+        raise ValueError(f"n_selected_neurons ({n_selected_neurons}) > total neurons ({activations.shape[1]})")
+
     extra_args = {}
     if group_ids is not None:
         extra_args["group_ids"] = group_ids
     if selection_method == "stability":
-        extra_args.update(
-            dict(
-                n_bootstrap=stability_n_bootstrap,
-                sample_fraction=stability_sample_fraction,
-                alphas=stability_alphas,
-                Cs=stability_Cs,
-                pi_threshold=stability_pi_threshold,
-                max_iter=stability_max_iter,
-                random_state=stability_random_state,
-            )
-        )
+        extra_args.update({
+            "n_bootstrap": stability_n_bootstrap,
+            "sample_fraction": stability_sample_fraction,
+            "pi_threshold": stability_pi_threshold,
+            "random_state": stability_random_state,
+            "n_alphas": stability_n_alphas,
+            "eps": stability_eps,
+            "standardize": stability_standardize,
+            "group_subsample": stability_group_subsample,
+        })
+
     selected_neurons, scores = select_neurons(
         activations=activations,
         target=labels,
@@ -308,6 +309,7 @@ def generate_hypotheses(
         classification=classification,
         **extra_args
     )
+
     interpreter = NeuronInterpreter(
         cache_name=cache_name,
         interpreter_model=interpreter_model,
