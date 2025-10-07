@@ -120,11 +120,11 @@ def select_neurons_correlation(
         for i in range(activations.shape[1])
     ])
 
-    sorted_indices = np.argsort(-np.abs(correlations))[:n_select]
+    # Stable sort for reproducibility under ties
+    sorted_indices = np.argsort(-np.abs(correlations), kind="mergesort")[:n_select]
     selected_correlations = correlations[sorted_indices]
 
     return sorted_indices.tolist(), selected_correlations.tolist()
-
 
 def select_neurons_separation_score(
     activations: np.ndarray,
@@ -150,10 +150,10 @@ def select_neurons_separation_score(
             zero_mean = np.mean(target[zero_indices])
         scores.append(top_mean - zero_mean)
     scores = np.array(scores)
-    sorted_indices = np.argsort(-np.abs(scores))[:n_select]
+    # Stable sort for reproducibility under ties
+    sorted_indices = np.argsort(-np.abs(scores), kind="mergesort")[:n_select]
     selected_scores = scores[sorted_indices]
     return sorted_indices.tolist(), selected_scores.tolist()
-
 
 def select_neurons_custom(
     activations: np.ndarray,
@@ -201,53 +201,10 @@ def select_neurons_presence_correlation(
         pearsonr(presence[:, i], target_group)[0]
         for i in range(presence.shape[1])
     ])
-    sorted_indices = np.argsort(-np.abs(correlations))[:n_select]
+    # Stable sort for reproducibility under ties
+    sorted_indices = np.argsort(-np.abs(correlations), kind="mergesort")[:n_select]
     return sorted_indices.tolist(), correlations[sorted_indices].tolist()
 
-
-def select_neurons_stability(
-    activations: np.ndarray,
-    target: np.ndarray,
-    n_select: int,
-    classification: bool = False,
-    *,
-    B: int = 100,
-    subsample: float = 0.5,
-    tau: float = 0.7,
-    alpha_grid: Optional[np.ndarray] = None,
-    random_state: Optional[int] = 123,
-    max_iter: int = 1000,
-) -> Tuple[List[int], List[float]]:
-    rng = np.random.default_rng(random_state)
-    n, p = activations.shape
-    if alpha_grid is None:
-        alpha_grid = np.logspace(-4, 2, 10)
-    counts = np.zeros(p, dtype=np.int64)
-    n_models = 0
-    m = int(np.ceil(subsample * n))
-    for _ in range(B):
-        idx = rng.choice(n, m, replace=False)
-        X = activations[idx]
-        y = target[idx]
-        Xs = StandardScaler().fit_transform(X)
-        for alpha in alpha_grid:
-            if classification:
-                model = LogisticRegression(penalty="l1", solver="liblinear", C=1.0/alpha, max_iter=max_iter)
-            else:
-                model = Lasso(alpha=alpha, max_iter=max_iter)
-            model.fit(Xs, y)
-            coef = np.ravel(model.coef_)
-            sel = np.flatnonzero(coef != 0)
-            counts[sel] += 1
-            n_models += 1
-    freq = counts / float(n_models if n_models > 0 else 1)
-    chosen = np.flatnonzero(freq >= tau)
-    if chosen.size == 0:
-        order = np.argsort(-freq, kind="mergesort")[:n_select]
-        return order.tolist(), freq[order].tolist()
-    order = chosen[np.argsort(-freq[chosen], kind="mergesort")]
-    return order.tolist(), freq[order].tolist()
-  
 def select_neurons(
     activations: np.ndarray,
     target: np.ndarray,
@@ -259,18 +216,42 @@ def select_neurons(
     if classification and len(np.unique(target)) > 2:
         raise ValueError("classification=True, but the target variable has more than 2 classes")
     if method == "lasso":
-        return select_neurons_lasso(activations=activations, target=target, n_select=n_select, classification=classification, **kwargs)
+        return select_neurons_lasso(
+            activations=activations,
+            target=target,
+            n_select=n_select,
+            classification=classification,
+            **kwargs
+        )
     elif method == "correlation":
-        return select_neurons_correlation(activations=activations, target=target, n_select=n_select, **kwargs)
+        return select_neurons_correlation(
+            activations=activations,
+            target=target,
+            n_select=n_select,
+            **kwargs
+        )
     elif method == "separation_score":
-        return select_neurons_separation_score(activations=activations, target=target, n_select=n_select, **kwargs)
+        return select_neurons_separation_score(
+            activations=activations,
+            target=target,
+            n_select=n_select,
+            **kwargs
+        )
     elif method == "presence_correlation":
-        return select_neurons_presence_correlation(activations=activations, target=target, n_select=n_select, group_ids=kwargs.get("group_ids", None))
-    elif method == "stability":
-        return select_neurons_stability(activations=activations, target=target, n_select=n_select, classification=classification, **kwargs)
+        return select_neurons_presence_correlation(
+            activations=activations,
+            target=target,
+            n_select=n_select,
+            group_ids=kwargs.get("group_ids", None)
+        )
     elif method == "custom":
         if "metric_fn" not in kwargs:
             raise ValueError("Must provide metric_fn for custom method")
-        return select_neurons_custom(activations=activations, target=target, n_select=n_select, **kwargs)
+        return select_neurons_custom(
+            activations=activations,
+            target=target,
+            n_select=n_select,
+            **kwargs
+        )
     else:
         raise ValueError(f"Unknown selection method: {method}")
