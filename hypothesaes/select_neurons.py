@@ -4,6 +4,7 @@ import time
 import numpy as np
 from typing import List, Optional, Callable, Tuple
 from sklearn.linear_model import Lasso, LogisticRegression, lasso_path 
+from sklearn.preprocessing import StandardScaler 
 from scipy.stats import pearsonr
 
 
