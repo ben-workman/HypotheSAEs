@@ -259,6 +259,13 @@ def generate_hypotheses(
     scoring_sampling_function: Callable = sample_top_zero,
     scoring_sampling_kwargs: Dict[str, Any] = None,
     task_specific_instructions: Optional[str] = None,
+    stability_pi_threshold: Optional[float] = None,
+    stability_n_bootstrap: int = 100,
+    stability_sample_fraction: float = 0.5,
+    stability_alphas: Optional[np.ndarray] = None,
+    stability_Cs: Optional[np.ndarray] = None,
+    stability_max_iter: int = 1000,
+    stability_random_state: Optional[int] = 0,
 ) -> pd.DataFrame:
     interpretation_sampling_kwargs = interpretation_sampling_kwargs or {}
     scoring_sampling_kwargs = scoring_sampling_kwargs or {}
@@ -266,7 +273,7 @@ def generate_hypotheses(
     embeddings = np.array(embeddings)
     X = torch.tensor(embeddings, dtype=torch.float32).to(device)
     if classification is None:
-        classification = np.all(np.isin(np.random.choice(labels, size=1000, replace=True), [0, 1]))
+        classification = np.all(np.isin(np.random.choice(labels, size=min(1000, len(labels)), replace=True), [0, 1]))
     if not isinstance(sae, list):
         sae = [sae]
     activations_list = []
@@ -275,11 +282,24 @@ def generate_hypotheses(
         activations_list.append(s.get_activations(X))
         neuron_source_sae_info += [(s.m_total_neurons, s.k_active_neurons)] * s.m_total_neurons
     activations = np.concatenate(activations_list, axis=1)
-    if n_selected_neurons > activations.shape[1]:
-        raise ValueError(f"n_selected_neurons ({n_selected_neurons}) > total neurons ({activations.shape[1]})")
+    if not (selection_method == "stability" and stability_pi_threshold is not None):
+        if n_selected_neurons > activations.shape[1]:
+            raise ValueError(f"n_selected_neurons ({n_selected_neurons}) > total neurons ({activations.shape[1]})")
     extra_args = {}
     if group_ids is not None:
         extra_args["group_ids"] = group_ids
+    if selection_method == "stability":
+        extra_args.update(
+            dict(
+                n_bootstrap=stability_n_bootstrap,
+                sample_fraction=stability_sample_fraction,
+                alphas=stability_alphas,
+                Cs=stability_Cs,
+                pi_threshold=stability_pi_threshold,
+                max_iter=stability_max_iter,
+                random_state=stability_random_state,
+            )
+        )
     selected_neurons, scores = select_neurons(
         activations=activations,
         target=labels,
@@ -295,10 +315,9 @@ def generate_hypotheses(
         n_workers_interpretation=n_workers_interpretation,
         n_workers_annotation=n_workers_annotation,
     )
-    sampling_function = interpretation_sampling_function
     interpret_config = InterpretConfig(
         sampling=SamplingConfig(
-            function=sampling_function,
+            function=interpretation_sampling_function,
             n_examples=n_examples_for_interpretation,
             max_words_per_example=max_words_per_example,
             extra_kwargs=interpretation_sampling_kwargs,
@@ -317,8 +336,10 @@ def generate_hypotheses(
         neuron_indices=selected_neurons,
         config=interpret_config,
     )
-    client = openai.OpenAI(api_key=os.environ["OPENAI_KEY_SAE"])
+    client = openai.OpenAI(api_key=os.environ.get("OPENAI_KEY_SAE"))
     def mentions_relevant_feature(text: str) -> bool:
+        if client is None:
+            return True
         user_prompt = (
             "Please review the following text and determine whether it describes a feature related to:\n"
             "  1. Teacher or student behaviors (for example, working in teams),\n"
@@ -331,94 +352,85 @@ def generate_hypotheses(
             "If you are unsure, please default to 'yes.'\n\n"
             f"Text: {text}"
         )
-        response = client.beta.chat.completions.parse(
-            model="gpt-5-mini",
-            messages=[{"role": "user", "content": user_prompt}]
-        )
-        answer = response.choices[0].message.content.strip().lower()
-        return answer.startswith("yes")
+        try:
+            response = client.chat.completions.create(
+                model="gpt-5-mini",
+                messages=[{"role": "user", "content": user_prompt}],
+                max_tokens=3,
+                temperature=0
+            )
+            ans = (response.choices[0].message.content or "").strip().lower()
+            return ans.startswith("yes")
+        except:
+            return True
     neuron_relevance: Dict[int, bool] = {}
     if filter:
         from concurrent.futures import ThreadPoolExecutor
-        tasks = [(idx, interp) for idx, interp_list in interpretations.items() for interp in interp_list]
-        relevance_map: Dict[int, Dict[str, bool]] = {}
-        def _check(task):
-            idx, text = task
-            try:
-                ok = mentions_relevant_feature(text)
-            except:
-                ok = False
-            return idx, text, ok
-        with ThreadPoolExecutor(max_workers=100) as executor:
-            for idx, text, ok in executor.map(_check, tasks):
-                relevance_map.setdefault(idx, {})[text] = ok
-        neuron_relevance = {idx: any(flags.values()) for idx, flags in relevance_map.items()}
+        pairs = [(idx, t) for idx, lst in interpretations.items() for t in lst]
+        rel_map: Dict[int, Dict[str, bool]] = {}
+        def _work(pair):
+            i, txt = pair
+            return i, txt, mentions_relevant_feature(txt)
+        with ThreadPoolExecutor(max_workers=n_workers_interpretation) as ex:
+            for i, txt, ok in ex.map(_work, pairs):
+                rel_map.setdefault(i, {})[txt] = ok
+        neuron_relevance = {i: any(d.values()) for i, d in rel_map.items()}
     results = []
     if n_scoring_examples == 0:
         for idx, score in zip(selected_neurons, scores):
             row = {
-                'neuron_idx': idx,
-                'source_sae': neuron_source_sae_info[idx],
-                f'target_{selection_method}': score,
-                'mentions_relevant_feature': bool(filter and neuron_relevance.get(idx, False)),
-                'best_interpretation': None,
-                f'{scoring_metric}_fidelity_score': None
+                "neuron_idx": idx,
+                "source_sae": neuron_source_sae_info[idx],
+                f"target_{selection_method}": score,
+                "mentions_relevant_feature": bool(filter and neuron_relevance.get(idx, False)),
+                "best_interpretation": None,
+                f"{scoring_metric}_fidelity_score": None
             }
             for j, text in enumerate(interpretations[idx], start=1):
-                row[f'interpretation_{j}'] = text
-                row[f'f1_score_{j}'] = None
+                row[f"interpretation_{j}"] = text
+                row[f"f1_score_{j}"] = None
             for j in range(len(interpretations[idx]) + 1, n_candidate_interpretations + 1):
-                row[f'interpretation_{j}'] = None
-                row[f'f1_score_{j}'] = None
+                row[f"interpretation_{j}"] = None
+                row[f"f1_score_{j}"] = None
             results.append(row)
+        return pd.DataFrame(results)
+    scoring_config = ScoringConfig(
+        n_examples=n_scoring_examples,
+        sampling_function=scoring_sampling_function,
+        sampling_kwargs=scoring_sampling_kwargs,
+    )
+    if filter:
+        scored = {i: interpretations[i] for i in interpretations if neuron_relevance.get(i, False)}
     else:
-        scoring_config = ScoringConfig(
-            n_examples=n_scoring_examples,
-            sampling_function=scoring_sampling_function,
-            sampling_kwargs=scoring_sampling_kwargs,
-        )
-        if filter:
-            scored_interpretations = {
-                idx: interpretations[idx]
-                for idx in interpretations
-                if neuron_relevance.get(idx, False)
-            }
+        scored = interpretations
+    metrics = interpreter.score_interpretations(
+        texts=texts,
+        activations=activations,
+        interpretations=scored,
+        config=scoring_config
+    )
+    for idx, score in zip(selected_neurons, scores):
+        ok = not filter or neuron_relevance.get(idx, False)
+        row = {
+            "neuron_idx": idx,
+            "source_sae": neuron_source_sae_info[idx],
+            f"target_{selection_method}": score,
+            "mentions_relevant_feature": bool(filter and neuron_relevance.get(idx, False))
+        }
+        for j, interp in enumerate(interpretations[idx], start=1):
+            row[f"interpretation_{j}"] = interp
+            row[f"f1_score_{j}"] = metrics[idx][interp][scoring_metric] if ok else None
+        for j in range(len(interpretations[idx]) + 1, n_candidate_interpretations + 1):
+            row[f"interpretation_{j}"] = None
+            row[f"f1_score_{j}"] = None
+        if ok:
+            best = max(interpretations[idx], key=lambda t: metrics[idx][t][scoring_metric])
+            row["best_interpretation"] = best
+            row[f"{scoring_metric}_fidelity_score"] = metrics[idx][best][scoring_metric]
         else:
-            scored_interpretations = interpretations
-        metrics = interpreter.score_interpretations(
-            texts=texts,
-            activations=activations,
-            interpretations=scored_interpretations,
-            config=scoring_config
-        )
-        for idx, score in zip(selected_neurons, scores):
-            is_rel = not filter or neuron_relevance.get(idx, False)
-            row = {
-                'neuron_idx': idx,
-                'source_sae': neuron_source_sae_info[idx],
-                f'target_{selection_method}': score,
-                'mentions_relevant_feature': bool(filter and neuron_relevance.get(idx, False))
-            }
-            for j, interp in enumerate(interpretations[idx], start=1):
-                row[f'interpretation_{j}'] = interp
-                if is_rel:
-                    row[f'f1_score_{j}'] = metrics[idx][interp][scoring_metric]
-                else:
-                    row[f'f1_score_{j}'] = None
-            for j in range(len(interpretations[idx]) + 1, n_candidate_interpretations + 1):
-                row[f'interpretation_{j}'] = None
-                row[f'f1_score_{j}'] = None
-            if is_rel:
-                best = max(
-                    interpretations[idx],
-                    key=lambda interp: metrics[idx][interp][scoring_metric]
-                )
-                row['best_interpretation'] = best
-                row[f'{scoring_metric}_fidelity_score'] = metrics[idx][best][scoring_metric]
-            else:
-                row['best_interpretation'] = None
-                row[f'{scoring_metric}_fidelity_score'] = None
-            results.append(row)
+            row["best_interpretation"] = None
+            row[f"{scoring_metric}_fidelity_score"] = None
+        results.append(row)
     return pd.DataFrame(results)
 
 def evaluate_hypotheses(

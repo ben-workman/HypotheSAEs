@@ -3,7 +3,7 @@
 import time
 import numpy as np
 from typing import List, Optional, Callable, Tuple
-from sklearn.linear_model import Lasso, LogisticRegression
+from sklearn.linear_model import Lasso, LogisticRegression, lasso_path, logistic_regression_path
 from sklearn.preprocessing import StandardScaler
 from scipy.stats import pearsonr
 
@@ -204,6 +204,60 @@ def select_neurons_presence_correlation(
     sorted_indices = np.argsort(-np.abs(correlations))[:n_select]
     return sorted_indices.tolist(), correlations[sorted_indices].tolist()
 
+def select_neurons_stability(
+    activations: np.ndarray,
+    target: np.ndarray,
+    n_select: int,
+    classification: bool = False,
+    group_ids: Optional[np.ndarray] = None,
+    n_bootstrap: int = 100,
+    sample_fraction: float = 0.5,
+    alphas: Optional[np.ndarray] = None,
+    Cs: Optional[np.ndarray] = None,
+    pi_threshold: Optional[float] = None,
+    max_iter: int = 1000,
+    random_state: Optional[int] = 0,
+    scale: bool = True,
+    verbose: bool = False,
+) -> Tuple[List[int], List[float]]:
+    X = activations
+    y = target
+    if group_ids is not None:
+        u = np.unique(group_ids)
+        X = np.vstack([activations[group_ids == g].mean(axis=0) for g in u])
+        y = np.array([target[group_ids == g].mean() for g in u])
+    if scale:
+        scaler = StandardScaler()
+        X = scaler.fit_transform(X)
+    rng = np.random.RandomState(random_state)
+    n, p = X.shape
+    m = max(1, int(np.floor(sample_fraction * n)))
+    counts = np.zeros(p, dtype=np.int32)
+    for b in range(n_bootstrap):
+        idx = rng.choice(n, size=m, replace=False)
+        Xb = X[idx]
+        yb = y[idx]
+        if classification:
+            if Cs is None:
+                Cs = np.logspace(-2, 2, 20)
+            _, coefs, _ = logistic_regression_path(Xb, yb, Cs=Cs, penalty="l1", solver="liblinear", max_iter=max_iter)
+            if coefs.ndim == 3:
+                sel = (np.abs(coefs).sum(axis=0) > 0).any(axis=1)
+            else:
+                sel = (np.abs(coefs) > 0).any(axis=1)
+        else:
+            _, _, coefs = lasso_path(Xb, yb, alphas=alphas, max_iter=max_iter)
+            sel = (np.abs(coefs) > 0).any(axis=1)
+        counts += sel.astype(np.int32)
+        if verbose and (b + 1) % max(1, n_bootstrap // 10) == 0:
+            pass
+    stability = counts.astype(float) / float(n_bootstrap)
+    if pi_threshold is not None:
+        idxs = np.where(stability >= pi_threshold)[0]
+        scores = stability[idxs]
+        return idxs.tolist(), scores.tolist()
+    order = np.argsort(-stability)[:n_select]
+    return order.tolist(), stability[order].tolist()
 
 def select_neurons(
     activations: np.ndarray,
@@ -251,6 +305,14 @@ def select_neurons(
             activations=activations,
             target=target,
             n_select=n_select,
+            **kwargs
+        )
+    elif method == "stability":
+        return select_neurons_stability(
+            activations=activations,
+            target=target,
+            n_select=n_select,
+            classification=classification,
             **kwargs
         )
     else:
