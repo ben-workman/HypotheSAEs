@@ -120,11 +120,11 @@ def select_neurons_correlation(
         for i in range(activations.shape[1])
     ])
 
-    # Stable sort for reproducibility under ties
-    sorted_indices = np.argsort(-np.abs(correlations), kind="mergesort")[:n_select]
+    sorted_indices = np.argsort(-np.abs(correlations))[:n_select]
     selected_correlations = correlations[sorted_indices]
 
     return sorted_indices.tolist(), selected_correlations.tolist()
+
 
 def select_neurons_separation_score(
     activations: np.ndarray,
@@ -150,10 +150,10 @@ def select_neurons_separation_score(
             zero_mean = np.mean(target[zero_indices])
         scores.append(top_mean - zero_mean)
     scores = np.array(scores)
-    # Stable sort for reproducibility under ties
-    sorted_indices = np.argsort(-np.abs(scores), kind="mergesort")[:n_select]
+    sorted_indices = np.argsort(-np.abs(scores))[:n_select]
     selected_scores = scores[sorted_indices]
     return sorted_indices.tolist(), selected_scores.tolist()
+
 
 def select_neurons_custom(
     activations: np.ndarray,
@@ -201,9 +201,9 @@ def select_neurons_presence_correlation(
         pearsonr(presence[:, i], target_group)[0]
         for i in range(presence.shape[1])
     ])
-    # Stable sort for reproducibility under ties
-    sorted_indices = np.argsort(-np.abs(correlations), kind="mergesort")[:n_select]
+    sorted_indices = np.argsort(-np.abs(correlations))[:n_select]
     return sorted_indices.tolist(), correlations[sorted_indices].tolist()
+
 
 def select_neurons(
     activations: np.ndarray,

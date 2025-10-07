@@ -3,7 +3,8 @@
 import numpy as np
 import pandas as pd
 from typing import List, Optional, Union, Tuple, Dict
-import torch, os, random
+import torch
+import os
 from pathlib import Path
 
 from .sae import SparseAutoencoder, load_model, get_sae_checkpoint_name
@@ -12,18 +13,7 @@ from .interpret_neurons import NeuronInterpreter, InterpretConfig, ScoringConfig
 from .utils import get_text_for_printing
 from .annotate import annotate_texts_with_concepts
 from .evaluation import score_hypotheses
-from .llm_api import get_completion
-
 BASE_DIR = Path(__file__).parent.parent
-
-def set_seed(seed: int = 123) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
 
 def train_sae(
     embeddings: Union[List, np.ndarray],
@@ -46,12 +36,33 @@ def train_sae(
     patience: int = 3,
     clip_grad: float = 1.0,
     show_progress: bool = True,
-    seed: Optional[int] = 123,
 ) -> SparseAutoencoder:
-    """Train a Sparse Autoencoder or load an existing one."""
-    if seed is not None:
-        set_seed(seed)
-
+    """Train a Sparse Autoencoder or load an existing one.
+    
+    Args:
+        embeddings: Pre-computed embeddings for training (list or numpy array)
+        M: Number of neurons in SAE
+        K: Number of top-activating neurons to keep per forward pass
+        matryoshka_prefix_lengths: List of prefix lengths for Matryoshka loss (None for vanilla SAE)
+        batch_topk: Whether to use batch Top-K sparsity
+        checkpoint_dir: Optional directory for storing/loading SAE checkpoints
+        overwrite_checkpoint: Whether to overwrite existing checkpoints
+        val_embeddings: Optional validation embeddings for early stopping during SAE training
+        aux_k: Number of neurons to consider for dead neuron revival
+        multi_k: Number of neurons for secondary reconstruction
+        dead_neuron_threshold_steps: Number of non-firing steps after which a neuron is considered dead
+        batch_size: Batch size for training
+        learning_rate: Learning rate for training
+        n_epochs: Maximum number of training epochs
+        aux_coef: Coefficient for auxiliary loss
+        multi_coef: Coefficient for multi-k loss
+        patience: Early stopping patience
+        clip_grad: Gradient clipping value
+        show_progress: Whether to show training progress bar
+        
+    Returns:
+        Trained SparseAutoencoder model
+    """
     embeddings = np.array(embeddings)
     input_dim = embeddings.shape[1]
     
@@ -88,7 +99,6 @@ def train_sae(
         patience=patience,
         clip_grad=clip_grad,
         show_progress=show_progress,
-        seed=seed,
     )
 
     return sae
@@ -110,9 +120,29 @@ def interpret_sae(
     print_examples_n: int = 3,
     print_examples_max_chars: int = 1024,
     task_specific_instructions: Optional[str] = None,
-    random_seed: Optional[int] = 0,
 ) -> Dict:
-    """Interpret neurons in a Sparse Autoencoder."""
+    """Interpret neurons in a Sparse Autoencoder.
+    
+    Args:
+        texts: Input text examples
+        embeddings: Pre-computed embeddings for the input texts
+        sae: A trained SAE model
+        neuron_indices: Specific neuron indices to interpret (mutually exclusive with n_random_neurons and n_top_neurons)
+        n_random_neurons: Number of random neurons to interpret (mutually exclusive with neuron_indices and n_top_neurons)
+        n_top_neurons: Number of most prevalent neurons to interpret (mutually exclusive with neuron_indices and n_random_neurons)
+        interpreter_model: LLM to use for generating interpretations
+        n_examples: Number of examples to use for interpretation
+        max_words_per_example: Maximum words per text to prompt the interpreter LLM with
+        temperature: Temperature for LLM generation
+        max_interpretation_tokens: Maximum tokens for interpretation
+        n_candidates: Number of candidate interpretations per neuron
+        print_examples_n: Number of top activating examples to print (0 to disable)
+        print_examples_max_chars: Maximum characters per example to print (None to print full text)
+        task_specific_instructions: Optional task-specific instructions to include in the interpretation prompt
+        
+    Returns:
+        Dictionary mapping neuron indices to their interpretations and top examples
+    """
     selection_params = [neuron_indices, n_random_neurons, n_top_neurons]
     if sum(p is not None for p in selection_params) != 1:
         raise ValueError("Exactly one of neuron_indices, n_random_neurons, or n_top_neurons must be provided")
@@ -133,8 +163,7 @@ def interpret_sae(
     total_neurons = activations.shape[1]
     if neuron_indices is None:
         if n_random_neurons is not None:
-            rng = np.random.default_rng(random_seed)
-            neuron_indices = rng.choice(total_neurons, size=n_random_neurons, replace=False)
+            neuron_indices = np.random.choice(total_neurons, size=n_random_neurons, replace=False)
         else:  # n_top_neurons is not None
             if n_top_neurons > total_neurons:
                 raise ValueError(f"n_top_neurons ({n_top_neurons}) cannot exceed total neurons ({total_neurons})")
@@ -149,7 +178,6 @@ def interpret_sae(
         sampling=SamplingConfig(
             n_examples=n_examples_for_interpretation,
             max_words_per_example=max_words_per_example,
-            random_seed=random_seed,
         ),
         llm=LLMConfig(
             temperature=interpret_temperature,
@@ -212,25 +240,39 @@ def generate_hypotheses(
     n_workers_interpretation: int = 10,
     n_workers_annotation: int = 30,
     task_specific_instructions: Optional[str] = None,
-    # NEW:
-    group_ids: Optional[np.ndarray] = None,
-    filter: bool = False,
-    random_state: Optional[int] = 123,
 ) -> Union[pd.DataFrame, Tuple[pd.DataFrame, np.ndarray]]:
-    """Generate interpretable hypotheses from text data using SAEs."""
-    if random_state is not None:
-        set_seed(random_state)
+    """Generate interpretable hypotheses from text data using SAEs.
+    
+    Args:
+        texts: Input text examples
+        labels: Target labels (binary for classification, continuous for regression)
+        embeddings: Pre-computed embeddings for the input texts (list or numpy array)
+        sae: A trained SAE model
+        cache_name: Optional string prefix for caching annotations
+        classification: Whether this is a classification task. If None, inferred from labels
+        selection_method: Method for selecting predictive neurons ('separation_score', 'correlation', 'lasso')
+        n_selected_neurons: Number of neurons to select and interpret
+        interpreter_model: LLM to use for generating interpretations
+        annotator_model: LLM to use for scoring interpretations
+        n_candidate_interpretations: Number of candidate interpretations per neuron
+        n_scoring_examples: Number of examples to use when scoring interpretations
+        scoring_metric: Metric to use for ranking interpretations ('f1', 'precision', 'recall', 'correlation')
+        task_specific_instructions: Optional task-specific instructions to include in the interpretation prompt
 
+    Returns:
+        DataFrame with columns: neuron_idx, target_{selection_method}, interpretation, interp_{scoring_metric}
+    """
+    
     labels = np.array(labels)
     if not isinstance(embeddings, torch.Tensor):
         X = torch.tensor(embeddings, dtype=torch.float)
     else:
         X = embeddings
     
-    if classification is None:  # Heuristic check for classification
-        classification = np.all(np.isin(np.random.choice(labels, size=min(1000, labels.shape[0]), replace=True), [0, 1]))
+    if classification is None: # Heuristic check for whether this is a classification task
+        classification = np.all(np.isin(np.random.choice(labels, size=1000, replace=True), [0, 1]))
     
-    print(f"Embeddings shape: {X.shape}")
+    print(f"Embeddings shape: {embeddings.shape}")
 
     # Get activations from SAE
     activations = sae.get_activations(X)
@@ -240,17 +282,13 @@ def generate_hypotheses(
     if n_selected_neurons > activations.shape[1]:
         raise ValueError(f"n_selected_neurons ({n_selected_neurons}) can be at most the total number of neurons ({activations.shape[1]})")
     
-    extra_args: Dict = {}
-    if group_ids is not None:
-        extra_args["group_ids"] = group_ids
-
     selected_neurons, scores = select_neurons(
         activations=activations,
         target=labels,
         n_select=n_selected_neurons,
         method=selection_method,
         classification=classification,
-        **extra_args,
+        verbose=True,
     )
 
     print(f"\nStep 2: Interpreting selected neurons")
@@ -266,7 +304,6 @@ def generate_hypotheses(
         sampling=SamplingConfig(
             n_examples=n_examples_for_interpretation,
             max_words_per_example=max_words_per_example,
-            random_seed=random_state,
         ),
         llm=LLMConfig(
             temperature=interpret_temperature,
@@ -283,33 +320,11 @@ def generate_hypotheses(
         config=interpret_config,
     )
 
-    def _mentions_relevant_feature(text: Optional[str]) -> bool:
-        """LLM-based filter; defaults to 'yes' on failure to be permissive."""
-        if text is None:
-            return False
-        prompt = (
-            "Answer 'yes' if the line below describes a teacher/student behavior, speech pattern, "
-            "or teaching style; answer 'no' if it mainly describes a specific math concept or a physical classroom object.\n\n"
-            f"Text: {text}\n\nAnswer:"
-        )
-        try:
-            resp = get_completion(
-                model=annotator_model,
-                prompt=prompt,
-                max_tokens=2,
-                timeout=15.0,
-            )
-            return str(resp).strip().lower().startswith("y")
-        except Exception:
-            return True  # permissive default
-
     # Prepare results dataframe
     results = []
     if n_scoring_examples == 0:
-        # Skip scoring entirely; optionally filter out whole neurons
+        # Skip scoring entirely
         for idx, score in zip(selected_neurons, scores):
-            if filter and not any(_mentions_relevant_feature(t) for t in interpretations[idx]):
-                continue
             results.append({
                 'neuron_idx': idx,
                 f'target_{selection_method}': score,
@@ -318,28 +333,17 @@ def generate_hypotheses(
     else:
         print(f"\nStep 3: Scoring Interpretations")
         scoring_config = ScoringConfig(n_examples=n_scoring_examples)
-
-        interps_for_scoring = (
-            {i: [t for t in lst if _mentions_relevant_feature(t)] for i, lst in interpretations.items()}
-            if filter else interpretations
-        )
-        # Remove neurons that have no surviving candidate after filtering
-        interps_for_scoring = {i: lst for i, lst in interps_for_scoring.items() if len(lst) > 0}
-
         metrics = interpreter.score_interpretations(
             texts=texts,
             activations=activations,
-            interpretations=interps_for_scoring,
+            interpretations=interpretations,
             config=scoring_config
         )
         
         for idx, score in zip(selected_neurons, scores):
-            if filter and idx not in interps_for_scoring:
-                continue
-            cand_list = interps_for_scoring[idx] if filter else interpretations[idx]
-            # Find best interpretation and its score
+            # Find best interpretation and its score using max()
             best_interp = max(
-                cand_list,
+                interpretations[idx],
                 key=lambda interp: metrics[idx][interp][scoring_metric]
             )
             best_score = metrics[idx][best_interp][scoring_metric]

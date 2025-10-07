@@ -283,7 +283,6 @@ class SparseAutoencoder(nn.Module):
     # ------------------------------------------------------------------
     # Training loop
     # ------------------------------------------------------------------
-    
     def fit(
         self,
         X_train: torch.Tensor,
@@ -296,20 +295,10 @@ class SparseAutoencoder(nn.Module):
         multi_coef: float = 0.0,
         patience: int = 5,
         show_progress: bool = True,
-        clip_grad: float = 1.0,
-        seed: Optional[int] = None,
+        clip_grad: float = 1.0
     ) -> Dict:
         """Train the sparse autoencoder on input data."""
-        g = None
-        if seed is not None:
-            g = torch.Generator().manual_seed(int(seed))
-
-        train_loader = DataLoader(
-            TensorDataset(X_train),
-            batch_size=batch_size,
-            shuffle=True,
-            generator=g,
-        )
+        train_loader = DataLoader(TensorDataset(X_train), batch_size=batch_size, shuffle=True)
         val_loader = DataLoader(TensorDataset(X_val), batch_size=batch_size) if X_val is not None else None
         
         # Initialize from batch of data
@@ -317,10 +306,12 @@ class SparseAutoencoder(nn.Module):
         
         optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate)
         
+        # Training loop setup
         best_val_loss = float('inf')
         patience_counter = 0
         history = {'train_loss': [], 'val_loss': [], 'dead_neuron_ratio': []}
         
+        # Training loop
         iterator = tqdm(range(n_epochs)) if show_progress else range(n_epochs)
         for epoch in iterator:
             self.train()
@@ -335,6 +326,7 @@ class SparseAutoencoder(nn.Module):
                 loss.backward()
                 self.adjust_decoder_gradient_()
                 
+                # Apply gradient clipping
                 if clip_grad is not None:
                     torch.nn.utils.clip_grad_norm_(self.parameters(), clip_grad)
                 
@@ -346,9 +338,11 @@ class SparseAutoencoder(nn.Module):
             avg_train_loss = np.mean(train_losses)
             history['train_loss'].append(avg_train_loss)
             
+            # Track dead neurons
             dead_ratio = (self.steps_since_activation > self.dead_neuron_threshold_steps).float().mean().item()
             history['dead_neuron_ratio'].append(dead_ratio)
             
+            # Validation
             if val_loader is not None:
                 self.eval()
                 val_losses = []
@@ -362,6 +356,7 @@ class SparseAutoencoder(nn.Module):
                 avg_val_loss = np.mean(val_losses)
                 history['val_loss'].append(avg_val_loss)
                 
+                # Early stopping check
                 if avg_val_loss < best_val_loss:
                     best_val_loss = avg_val_loss
                     patience_counter = 0
@@ -371,6 +366,7 @@ class SparseAutoencoder(nn.Module):
                         print(f"Early stopping triggered after {epoch+1} epochs")
                         break
             
+            # Update progress bar
             if show_progress:
                 postfix = {
                     'train_loss': f'{avg_train_loss:.4f}',
@@ -381,13 +377,14 @@ class SparseAutoencoder(nn.Module):
                     postfix['threshold'] = f'{self.threshold.item():.2e}'
                 iterator.set_postfix(postfix)
         
+        # Save final model
         if save_dir is not None:
             os.makedirs(save_dir, exist_ok=True)
             filename = get_sae_checkpoint_name(self.m_total_neurons, self.k_active_neurons, self.prefix_lengths)
             self.save(os.path.join(save_dir, filename))
             
         return history
-        
+    
     # ------------------------------------------------------------------
     # Compute activations with batched SAE inference
     # ------------------------------------------------------------------
