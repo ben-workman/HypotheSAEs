@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hypothesaes"
-version = "1.0.0"
+version = "0.0.5"
 authors = [
     {name = "Rajiv Movva", email = "rmovva@berkeley.edu"},
     {name = "Kenny Peng", email = "kennypeng@cs.cornell.edu"},
 ]
 description = "Hypothesizing interpretable relationships in text datasets using sparse autoencoders."
 readme = "README.md"
-requires-python = ">=3.10,<3.13"
+requires-python = ">=3.9"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
@@ -23,7 +23,6 @@ dynamic = ["dependencies"]
 [project.urls]
 "Homepage" = "https://github.com/rmovva/HypotheSAEs"
 "Bug Tracker" = "https://github.com/rmovva/HypotheSAEs/issues"
-"Changelog" = "https://github.com/rmovva/HypotheSAEs/blob/main/CHANGELOG.md"
 
 [tool.setuptools]
 packages = ["hypothesaes"]

@@ -10,15 +10,13 @@ import time
 from pathlib import Path
 import glob
 import torch
-import openai
-from .utils import filter_invalid_texts
-from sentence_transformers import SentenceTransformer
-import torch
-import gc
 
+from .utils import filter_invalid_texts
 
 # Use environment variable for cache dir if set, otherwise use default
 CACHE_DIR = os.getenv('EMB_CACHE_DIR') or os.path.join(Path(__file__).parent.parent, 'emb_cache')
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
 def _embed_batch_openai(
         batch: List[str], 
@@ -27,7 +25,7 @@ def _embed_batch_openai(
         max_tokens: int = 8192, 
         max_retries: int = 3, 
         backoff_factor: float = 3.0,
-        timeout: float = 10.0
+        timeout: float = 10.0,
 ) -> List[List[float]]:
     """Helper function for batch embedding using OpenAI API."""
     # Truncate texts to max tokens
@@ -49,13 +47,13 @@ def _embed_batch_openai(
             )
             return [data.embedding for data in response.data]
             
-        except (openai.RateLimitError, openai.APITimeoutError) as e:
+        except Exception as e:
             if attempt == max_retries - 1:  # Last attempt
                 raise e
             
-            wait_time = timeout * (backoff_factor ** attempt)
-            if attempt > 0:
-                print(f"API error: {e}; retrying in {wait_time:.1f}s... ({attempt + 1}/{max_retries})")
+            # Exponential backoff
+            wait_time = (timeout * (backoff_factor ** attempt))
+            print(f"API timeout, retrying in {wait_time:.1f}s... ({attempt + 1}/{max_retries})")
             time.sleep(wait_time)
 
 
@@ -207,9 +205,10 @@ def get_local_embeddings(
     show_progress: bool = True,
     cache_name: Optional[str] = None,
     chunk_size: int = 50000,
-    device: Optional[torch.device] = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 ) -> Dict[str, np.ndarray]:
     """Get embeddings using local SentenceTransformer model with chunked caching."""
+    from sentence_transformers import SentenceTransformer
+
     # Filter out None values and empty strings
     texts = filter_invalid_texts(texts)
     
@@ -248,12 +247,12 @@ def get_local_embeddings(
         for i in batch_iterator:
             batch = chunk_texts[i:i+batch_size]
             if "nomic-ai" in model:
-                prefixed_batch = ["clustering: " + text for text in batch]
+                batch = ["search_document: " + text for text in batch]
             elif "instructor" in model:
-                prefixed_batch = [["Represent the text for classification: ", text] for text in batch]
+                batch = [["Represent the text for classification: ", text] for text in batch]
             else:
-                prefixed_batch = batch
-            batch_embs = transformer_model.encode(prefixed_batch, batch_size=batch_size)
+                batch = batch
+            batch_embs = transformer_model.encode(batch, batch_size=batch_size)
             
             for text, embedding in zip(batch, batch_embs):
                 chunk_embeddings[text] = embedding
@@ -261,10 +260,5 @@ def get_local_embeddings(
         
         # Save completed chunk
         next_chunk_idx = _save_embedding_chunk(cache_name, chunk_embeddings, next_chunk_idx)
-
-    del transformer_model
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
     
     return text2embedding
