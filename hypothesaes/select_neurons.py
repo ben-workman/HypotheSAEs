@@ -3,7 +3,7 @@
 import time
 import numpy as np
 from typing import List, Optional, Callable, Tuple
-from sklearn.linear_model import Lasso, LogisticRegression, lasso_path 
+from sklearn.linear_model import Lasso, LogisticRegression, lasso_path, LinearRegression 
 from sklearn.preprocessing import StandardScaler 
 from scipy.stats import pearsonr
 
@@ -204,66 +204,173 @@ def select_neurons_presence_correlation(
     sorted_indices = np.argsort(-np.abs(correlations))[:n_select]
     return sorted_indices.tolist(), correlations[sorted_indices].tolist()
 
+def stability_select_lasso(
+    X, y, *,
+    B=200,
+    frac=0.5,
+    q=20,
+    pi_thr=0.7,
+    random_state=123,
+    n_alphas=100,
+    standardize=True,
+    groups=None,
+    group_subsample=False,
+    cpps=False,
+    jitter_range=(1.0, 1.0),
+    return_refit=False,
+    return_diagnostics=False
+):
+    rng = np.random.RandomState(random_state)
+    X = np.asarray(X, dtype=float)
+    y = np.asarray(y, dtype=float)
+    y_orig = y.copy()
+
+    X_raw = X.copy()
+    if standardize:
+        X = StandardScaler().fit_transform(X)
+    y = y - y.mean()
+
+    n, p = X.shape
+    alphas_fixed, coefs_full, _ = lasso_path(X, y, n_alphas=n_alphas, copy_X=False)
+
+    if groups is not None and group_subsample:
+        groups = np.asarray(groups)
+        uniq_groups = np.unique(groups)
+        def sample_indices_k_rows(k):
+            g_order = rng.permutation(uniq_groups)
+            chosen_rows = []
+            for g in g_order:
+                chosen_rows.append(np.flatnonzero(groups == g))
+                if sum(len(ix) for ix in chosen_rows) >= k:
+                    break
+            idx_pool = np.concatenate(chosen_rows) if chosen_rows else rng.choice(n, size=k, replace=False)
+            if idx_pool.size > k:
+                idx_pool = rng.choice(idx_pool, size=k, replace=False)
+            return idx_pool
+    else:
+        def sample_indices_k_rows(k):
+            return rng.choice(n, size=k, replace=False)
+
+    def pick_take_n():
+        return max(1, (n // 2) if cpps else int(np.ceil(frac * n)))
+
+    def run_once(idx):
+        Xb = X[idx]
+        yb = y[idx]
+        if jitter_range != (1.0, 1.0):
+            w = rng.uniform(jitter_range[0], jitter_range[1], size=p)
+            Xb_tilt = Xb / w[np.newaxis, :]
+        else:
+            Xb_tilt = Xb
+        alphas, coefs, _ = lasso_path(Xb_tilt, yb, alphas=alphas_fixed, copy_X=False)
+        support_path = (coefs != 0)
+        sizes = support_path.sum(axis=0)
+        diffs = np.abs(sizes - q)
+        j_star = int(np.argmin(diffs))
+        if np.any(sizes <= q):
+            j_star = int(np.argmin(np.where(sizes <= q, diffs, np.inf)))
+        support = support_path[:, j_star].astype(float)
+        return support, float(sizes[j_star]), int(j_star)
+
+    sel_counts = np.zeros(p, dtype=float)
+    support_sizes = []
+    chosen_j_hist = []
+    total_fits = 0
+
+    for _ in range(B):
+        take_n = pick_take_n()
+        idx = sample_indices_k_rows(take_n)
+        s, sz, j = run_once(idx)
+        sel_counts += s
+        support_sizes.append(sz)
+        chosen_j_hist.append(j)
+        total_fits += 1
+        if cpps:
+            comp = np.setdiff1d(np.arange(n), idx, assume_unique=False)
+            if comp.size == 0:
+                comp = sample_indices_k_rows(take_n)
+            s2, sz2, j2 = run_once(comp)
+            sel_counts += s2
+            support_sizes.append(sz2)
+            chosen_j_hist.append(j2)
+            total_fits += 1
+
+    pi = sel_counts / max(1, total_fits)
+    selected = np.where(pi >= pi_thr)[0]
+    if selected.size == 0:
+        selected = np.array([int(np.argmax(pi))])
+    order = np.argsort(-pi[selected])
+    selected = selected[order]
+    selected_pi = pi[selected]
+
+    outs = [selected.tolist(), selected_pi.tolist(), pi]
+
+    if return_refit:
+        coef_full = np.zeros(p, dtype=float)
+        if selected.size > 0:
+            ref = LinearRegression()
+            ref.fit(X_raw[:, selected], y_orig)
+            coef_full[selected] = ref.coef_
+            intercept = ref.intercept_
+        else:
+            intercept = float(np.mean(y_orig))
+        outs.extend([coef_full, intercept])
+
+    if return_diagnostics:
+        avg_support = float(np.mean(support_sizes)) if support_sizes else 0.0
+        mb_bound = None
+        if pi_thr > 0.5:
+            mb_bound = (q**2) / ((2.0 * pi_thr - 1.0) * p)
+        diagnostics = {
+            "avg_support_per_fit": avg_support,
+            "alphas": alphas_fixed.tolist(),
+            "chosen_lambda_index_hist": chosen_j_hist,
+            "total_fits": int(total_fits),
+            "mb_expected_false_positives_bound": mb_bound
+        }
+        outs.append(diagnostics)
+
+    return tuple(outs)
+
 def select_neurons_stability(
     activations: np.ndarray,
     target: np.ndarray,
     n_select: int = 0,
     *,
     group_ids: Optional[np.ndarray] = None,
-    n_bootstrap: int = 100,
+    n_bootstrap: int = 200,
     sample_fraction: float = 0.5,
+    q: Optional[int] = None,
     pi_threshold: float = 0.7,
     random_state: Optional[int] = None,
     n_alphas: int = 100,
-    eps: float = 1e-3,
     standardize: bool = True,
     group_subsample: bool = True,
+    cpps: bool = False,
+    jitter_range: tuple = (1.0, 1.0),
+    return_refit: bool = False,
+    return_diagnostics: bool = False,
 ) -> Tuple[List[int], List[float]]:
-    rng = np.random.RandomState(random_state)
-    X = activations
-    y = target.astype(float)
-
-    if standardize:
-        scaler = StandardScaler()
-        X = scaler.fit_transform(X)
-        y = (y - y.mean()) / (y.std() + 1e-12)
-
-    n, p = X.shape
-    sel_counts = np.zeros(p, dtype=float)
-
-    if group_ids is not None and group_subsample:
-        groups = np.asarray(group_ids)
-        uniq = np.unique(groups)
-        g = len(uniq)
-        take_g = max(1, int(np.ceil(sample_fraction * g)))
-
-    for _ in range(n_bootstrap):
-        if group_ids is not None and group_subsample:
-            chosen_groups = rng.choice(uniq, size=take_g, replace=False)
-            idx = np.isin(groups, chosen_groups).nonzero()[0]
-        else:
-            take_n = max(1, int(np.ceil(sample_fraction * n)))
-            idx = rng.choice(n, size=take_n, replace=False)
-
-        Xb = X[idx]
-        yb = y[idx]
-
-        alphas, coefs, _ = lasso_path(
-            Xb, yb, n_alphas=n_alphas, eps=eps, fit_intercept=False, copy_X=False
-        )
-        support_any = (coefs != 0).any(axis=1)
-        sel_counts += support_any.astype(float)
-
-    pi = sel_counts / n_bootstrap
-    selected = np.where(pi >= pi_threshold)[0]
-
-    if selected.size == 0:
-        selected = np.array([int(np.argmax(pi))])
-
-    order = np.argsort(-pi[selected])
-    final_idx = selected[order].tolist()
-    final_scores = pi[selected][order].tolist()
-    return final_idx, final_scores
+    p = activations.shape[1]
+    if q is None:
+        q = max(5, min(50, p // 10))
+    selected, selected_pi, _ = stability_select_lasso(
+        activations, target,
+        B=n_bootstrap,
+        frac=sample_fraction,
+        q=q,
+        pi_thr=pi_threshold,
+        random_state=random_state if random_state is not None else 0,
+        n_alphas=n_alphas,
+        standardize=standardize,
+        groups=group_ids,
+        group_subsample=group_subsample,
+        cpps=cpps,
+        jitter_range=jitter_range,
+        return_refit=return_refit,
+        return_diagnostics=return_diagnostics
+    )
+    return selected, selected_pi
 
 def select_neurons(
     activations: np.ndarray,

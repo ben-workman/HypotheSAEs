@@ -259,14 +259,16 @@ def generate_hypotheses(
     scoring_sampling_function: Callable = sample_top_zero,
     scoring_sampling_kwargs: Dict[str, Any] = None,
     task_specific_instructions: Optional[str] = None,
-    stability_n_bootstrap: int = 100,
+    stability_n_bootstrap: int = 200,
     stability_sample_fraction: float = 0.5,
+    stability_q: Optional[int] = None,
     stability_pi_threshold: float = 0.7,
     stability_random_state: Optional[int] = None,
     stability_n_alphas: int = 100,
-    stability_eps: float = 1e-3,
     stability_standardize: bool = True,
     stability_group_subsample: bool = True,
+    stability_cpps: bool = False,
+    stability_jitter_range: tuple = (1.0, 1.0),
 ) -> pd.DataFrame:
     interpretation_sampling_kwargs = interpretation_sampling_kwargs or {}
     scoring_sampling_kwargs = scoring_sampling_kwargs or {}
@@ -293,12 +295,14 @@ def generate_hypotheses(
         extra_args.update({
             "n_bootstrap": stability_n_bootstrap,
             "sample_fraction": stability_sample_fraction,
+            "q": stability_q,
             "pi_threshold": stability_pi_threshold,
             "random_state": stability_random_state,
             "n_alphas": stability_n_alphas,
-            "eps": stability_eps,
             "standardize": stability_standardize,
             "group_subsample": stability_group_subsample,
+            "cpps": stability_cpps,
+            "jitter_range": stability_jitter_range,
         })
 
     selected_neurons, scores = select_neurons(
