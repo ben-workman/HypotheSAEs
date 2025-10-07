@@ -1,8 +1,5 @@
 """HypotheSAEs: SAEs for hypothesis generation."""
 
-# Version information
-__version__ = "0.0.3"
-
 # Import key functions and classes to expose at the package level
 from .quickstart import (
     train_sae,
@@ -13,8 +10,7 @@ from .quickstart import (
 
 from .sae import (
     SparseAutoencoder,
-    load_model,
-    get_multiple_sae_activations
+    load_model
 )
 
 from .embedding import (
@@ -49,7 +45,6 @@ __all__ = [
     # Core classes
     "SparseAutoencoder",
     "load_model",
-    "get_multiple_sae_activations",
     
     # Embedding functions
     "get_openai_embeddings",
