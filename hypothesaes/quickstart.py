@@ -7,8 +7,9 @@ import torch
 import os, openai 
 from pathlib import Path
 import random
+from sklearn.cluster import MiniBatchKMeans
 
-from .sae import SparseAutoencoder, load_model
+from .sae import SparseAutoencoder, load_model, dictionary_from_model, average_pairwise_stability
 from .select_neurons import select_neurons
 from .interpret_neurons import NeuronInterpreter, InterpretConfig, ScoringConfig, LLMConfig, SamplingConfig, sample_top_zero, sample_percentile_bins
 from .utils import get_text_for_printing
@@ -24,82 +25,90 @@ def set_seed(seed: int = 123):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark     = False
+    torch.backends.cudnn.benchmark     = False 
+
+def _fmt_param(param):
+    if isinstance(param, (list, tuple, np.ndarray)):
+        return "-".join(str(int(x)) for x in param)
+    return str(int(param))
+
+def _get_checkpoint_path(checkpoint_dir, M, K, ra):
+    m_str = _fmt_param(M)
+    k_str = _fmt_param(K)
+    suffix = "RA" if ra else "Free"
+    return os.path.join(checkpoint_dir, f"SAE_{suffix}_M={m_str}_K={k_str}.pt")
+
+def _maybe_make_prototypes(embeddings: np.ndarray, checkpoint_dir: str | None, opts: dict | None, input_dim: int) -> np.ndarray | None:
+    if not opts:
+        return None
+    if 'prototypes' in opts and opts['prototypes'] is not None:
+        P = np.array(opts['prototypes'], dtype=np.float32)
+        return P
+    n_centroids = int(opts.get('n_centroids', 2048))
+    random_state = int(opts.get('random_state', 0))
+    kmeans_bs = int(opts.get('kmeans_batch_size', 8192))
+    n_init = opts.get('n_init', "auto")
+    cache = bool(opts.get('cache_prototypes', True))
+    path = None
+    if cache and checkpoint_dir is not None:
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        path = os.path.join(checkpoint_dir, f"prototypes_n{n_centroids}_rs{random_state}_dim{input_dim}.npy")
+        if os.path.exists(path):
+            return np.load(path)
+    mbk = MiniBatchKMeans(n_clusters=n_centroids, batch_size=kmeans_bs, n_init=n_init, random_state=random_state)
+    mbk.fit(embeddings)
+    C = mbk.cluster_centers_.astype(np.float32)
+    if path is not None:
+        np.save(path, C)
+    return C
 
 def train_sae(
-    embeddings: Union[list, np.ndarray],
-    M: Union[int, list],  
-    K: int,  
+    embeddings,
+    M,
+    K,
     *,
-    checkpoint_dir: Optional[str] = None,
-    overwrite_checkpoint: bool = False,
-    val_embeddings: Optional[Union[list, np.ndarray]] = None,
-    aux_k: Optional[int] = None,
-    multi_k: Optional[int] = None,
-    dead_neuron_threshold_steps: int = 256,
-    batch_size: int = 512,
-    learning_rate: float = 5e-4,
-    n_epochs: int = 100,
-    aux_coef: float = 1/32,
-    multi_coef: float = 0.0,
-    patience: int = 3,
-    clip_grad: float = 1.0,
+    checkpoint_dir=None,
+    overwrite_checkpoint=False,
+    val_embeddings=None,
+    aux_k=None,
+    multi_k=None,
+    dead_neuron_threshold_steps=256,
+    batch_size=512,
+    learning_rate=5e-4,
+    n_epochs=100,
+    aux_coef=1/32,
+    multi_coef=0.0,
+    patience=3,
+    clip_grad=1.0,
+    archetypal_opts=None
 ) -> SparseAutoencoder:
-    """Train a Sparse Autoencoder or load an existing one.
-    
-    Args:
-        embeddings: Pre-computed embeddings for training (list or numpy array).
-        M: Number of neurons in SAE. If provided as a list [m1, m2, ..., mn] (with m1 < ... < mn),
-           the model trains a Matryoshka Sparse Autoencoder with nested dictionary sizes.
-        K: Number of top-activating neurons to keep per forward pass. If provided as a list, it specifies
-           the corresponding active neuron counts for each nested sub-SAE.
-        checkpoint_dir: Optional directory for storing/loading SAE checkpoints.
-        val_embeddings: Optional validation embeddings for early stopping during SAE training.
-        aux_k: Number of neurons to consider for dead neuron revival.
-        multi_k: Number of neurons for secondary reconstruction.
-        dead_neuron_threshold_steps: Number of non-firing steps after which a neuron is considered dead.
-        batch_size: Batch size for training.
-        learning_rate: Learning rate for training.
-        n_epochs: Maximum number of training epochs.
-        aux_coef: Coefficient for auxiliary loss.
-        multi_coef: Coefficient for multi-k loss.
-        patience: Early stopping patience.
-        clip_grad: Gradient clipping value.
-        
-    Returns:
-        Trained SparseAutoencoder model.
-    """
-
-    embeddings = np.array(embeddings)
+    embeddings = np.array(embeddings, dtype=np.float32)
     input_dim = embeddings.shape[1]
-    
-    X = torch.tensor(embeddings, dtype=torch.float32).to(device)
-    X_val = torch.tensor(val_embeddings, dtype=torch.float32).to(device) if val_embeddings is not None else None
-    
-    def _format_param_for_filename(param):
-        if isinstance(param, (list, tuple, np.ndarray)):
-            return "-".join(str(int(x)) for x in param)
-        else:
-            return str(int(param)) 
-
+    X = torch.tensor(embeddings, dtype=torch.float32, device=torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+    X_val = torch.tensor(val_embeddings, dtype=torch.float32, device=X.device) if val_embeddings is not None else None
     if checkpoint_dir is not None:
-        os.makedirs(checkpoint_dir, exist_ok=True)
-        m_str = _format_param_for_filename(M)
-        k_str = _format_param_for_filename(K)
-        checkpoint_path = os.path.join(checkpoint_dir, f"SAE_M={m_str}_K={k_str}.pt")
-        if os.path.exists(checkpoint_path) and not overwrite_checkpoint:
-            return load_model(checkpoint_path).to(device)
-    
-    sae = SparseAutoencoder(
+        ckpt_path = _get_checkpoint_path(checkpoint_dir, M, K, archetypal_opts is not None)
+        if os.path.exists(ckpt_path) and not overwrite_checkpoint:
+            return load_model(ckpt_path)
+    decoder_type = "free" if archetypal_opts is None else "archetypal"
+    archetypal_C = None
+    ra_delta = 1.0
+    if archetypal_opts is not None:
+        C_np = _maybe_make_prototypes(embeddings, checkpoint_dir, archetypal_opts, input_dim)
+        archetypal_C = torch.from_numpy(C_np)
+        ra_delta = float(archetypal_opts.get("delta", 1.0))
+    model = SparseAutoencoder(
         input_dim=input_dim,
         m_total_neurons=M,
-        k_active_neurons=K,
+        k_active_neurons=K if isinstance(K, int) else max(K),
         aux_k=aux_k,
         multi_k=multi_k,
         dead_neuron_threshold_steps=dead_neuron_threshold_steps,
-    ).to(device)
-    
-    sae.fit(
+        decoder_type=decoder_type,
+        archetypal_C=archetypal_C,
+        ra_delta=ra_delta
+    )
+    model.fit(
         X_train=X,
         X_val=X_val,
         save_dir=checkpoint_dir,
@@ -111,8 +120,35 @@ def train_sae(
         patience=patience,
         clip_grad=clip_grad,
     )
+    return model
 
-    return sae
+def benchmark_stability(
+    embeddings,
+    M,
+    K: int,
+    seeds,
+    train_kwargs: dict,
+    archetypal_opts: dict | None = None
+) -> dict:
+    from sae import dictionary_from_model, average_pairwise_stability
+    models, dicts = [], []
+    for s in seeds:
+        set_seed(s)
+        opts = None
+        if archetypal_opts is not None:
+            opts = dict(archetypal_opts)
+            opts.setdefault('random_state', s)
+            opts.setdefault('cache_prototypes', True)
+        mdl = train_sae(
+            embeddings=embeddings,
+            M=M,
+            K=K,
+            archetypal_opts=opts,
+            **train_kwargs
+        )
+        models.append(mdl)
+        dicts.append(dictionary_from_model(mdl))
+    return {"mean_pairwise_stability": average_pairwise_stability(dicts), "num_runs": len(models)}
 
 def interpret_sae(
     texts: List[str],
