@@ -130,7 +130,6 @@ def benchmark_stability(
     train_kwargs: dict,
     archetypal_opts: dict | None = None
 ) -> dict:
-    from sae import dictionary_from_model, average_pairwise_stability
     models, dicts = [], []
     for s in seeds:
         set_seed(s)

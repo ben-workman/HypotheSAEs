@@ -337,7 +337,7 @@ def stability_score(D1: np.ndarray, D2: np.ndarray) -> float:
     A = D1 / (np.linalg.norm(D1, axis=1, keepdims=True) + 1e-12)
     B = D2 / (np.linalg.norm(D2, axis=1, keepdims=True) + 1e-12)
     S = A @ B.T
-    cost = -S
+    cost = -S 
     row_ind, col_ind = linear_sum_assignment(cost)
     return float(S[row_ind, col_ind].mean())
 
