@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from typing import List, Optional, Union, Tuple, Dict, Callable, Any
 import torch
-import os, openai 
+import os, openai
 from pathlib import Path
 import random
 from sklearn.cluster import MiniBatchKMeans
@@ -15,8 +15,9 @@ from .interpret_neurons import NeuronInterpreter, InterpretConfig, ScoringConfig
 from .utils import get_text_for_printing
 from .annotate import annotate_texts_with_concepts
 from .evaluation import score_hypotheses
+
 BASE_DIR = Path(__file__).parent.parent
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def set_seed(seed: int = 123):
     random.seed(seed)
@@ -25,7 +26,7 @@ def set_seed(seed: int = 123):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark     = False 
+    torch.backends.cudnn.benchmark     = False
 
 def _fmt_param(param):
     if isinstance(param, (list, tuple, np.ndarray)):
@@ -38,29 +39,82 @@ def _get_checkpoint_path(checkpoint_dir, M, K, ra):
     suffix = "RA" if ra else "Free"
     return os.path.join(checkpoint_dir, f"SAE_{suffix}_M={m_str}_K={k_str}.pt")
 
-def _maybe_make_prototypes(embeddings: np.ndarray, checkpoint_dir: str | None, opts: dict | None, input_dim: int) -> np.ndarray | None:
+def _extract_proto_random_state(opts: dict) -> int:
+    """Prefer 'proto_random_state'; fall back to 'random_state'; default 0."""
+    return int(opts.get('proto_random_state', opts.get('random_state', 0)))
+
+def _maybe_make_prototypes(
+    embeddings: np.ndarray,
+    checkpoint_dir: str | None,
+    opts: dict | None,
+    input_dim: int
+) -> np.ndarray | None:
+    """
+    Build or load prototype centroids C. If 'prototypes' is present, just return it.
+    Otherwise, run MiniBatchKMeans with a *fixed* proto_random_state (not the training seed).
+    """
     if not opts:
         return None
     if 'prototypes' in opts and opts['prototypes'] is not None:
         P = np.array(opts['prototypes'], dtype=np.float32)
+        if P.shape[1] != input_dim:
+            raise ValueError(f"prototypes has dim {P.shape[1]} but embeddings dim is {input_dim}")
         return P
-    n_centroids = int(opts.get('n_centroids', 2048))
-    random_state = int(opts.get('random_state', 0))
-    kmeans_bs = int(opts.get('kmeans_batch_size', 8192))
-    n_init = opts.get('n_init', "auto")
-    cache = bool(opts.get('cache_prototypes', True))
+
+    n_centroids   = int(opts.get('n_centroids', 2048))
+    proto_rs      = _extract_proto_random_state(opts)        
+    kmeans_bs     = int(opts.get('kmeans_batch_size', 8192))
+    n_init        = opts.get('n_init', "auto")
+    cache         = bool(opts.get('cache_prototypes', True))
+
     path = None
     if cache and checkpoint_dir is not None:
         os.makedirs(checkpoint_dir, exist_ok=True)
-        path = os.path.join(checkpoint_dir, f"prototypes_n{n_centroids}_rs{random_state}_dim{input_dim}.npy")
+        path = os.path.join(
+            checkpoint_dir,
+            f"prototypes_n{n_centroids}_rs{proto_rs}_dim{input_dim}.npy"
+        )
         if os.path.exists(path):
             return np.load(path)
-    mbk = MiniBatchKMeans(n_clusters=n_centroids, batch_size=kmeans_bs, n_init=n_init, random_state=random_state)
+
+    mbk = MiniBatchKMeans(
+        n_clusters=n_centroids,
+        batch_size=kmeans_bs,
+        n_init=n_init,
+        random_state=proto_rs
+    )
     mbk.fit(embeddings)
     C = mbk.cluster_centers_.astype(np.float32)
     if path is not None:
         np.save(path, C)
     return C
+
+def _freeze_prototypes_for_benchmark(
+    embeddings: np.ndarray,
+    archetypal_opts: dict | None,
+    checkpoint_dir: str | None,
+    input_dim: int
+) -> dict | None:
+    """
+    Ensure the same prototypes are used across *all* runs in a benchmark.
+    Returns a copy of archetypal_opts with a concrete 'prototypes' matrix injected.
+    """
+    if archetypal_opts is None:
+        return None
+    opts = dict(archetypal_opts)  
+    if 'prototypes' in opts and opts['prototypes'] is not None:
+        P = np.array(opts['prototypes'], dtype=np.float32)
+        if P.shape[1] != input_dim:
+            raise ValueError(f"prototypes has dim {P.shape[1]} but embeddings dim is {input_dim}")
+        opts['prototypes'] = P
+        return opts
+
+    C = _maybe_make_prototypes(embeddings, checkpoint_dir, opts, input_dim)
+    opts['prototypes'] = C
+    for k in ['n_centroids', 'kmeans_batch_size', 'n_init', 'random_state', 'proto_random_state', 'cache_prototypes']:
+        if k in opts:
+            del opts[k]
+    return opts
 
 def train_sae(
     embeddings,
@@ -84,19 +138,23 @@ def train_sae(
 ) -> SparseAutoencoder:
     embeddings = np.array(embeddings, dtype=np.float32)
     input_dim = embeddings.shape[1]
-    X = torch.tensor(embeddings, dtype=torch.float32, device=torch.device("cuda" if torch.cuda.is_available() else "cpu"))
-    X_val = torch.tensor(val_embeddings, dtype=torch.float32, device=X.device) if val_embeddings is not None else None
+    X = torch.tensor(embeddings, dtype=torch.float32, device=device)
+    X_val = torch.tensor(val_embeddings, dtype=torch.float32, device=device) if val_embeddings is not None else None
+
     if checkpoint_dir is not None:
         ckpt_path = _get_checkpoint_path(checkpoint_dir, M, K, archetypal_opts is not None)
         if os.path.exists(ckpt_path) and not overwrite_checkpoint:
             return load_model(ckpt_path)
+
     decoder_type = "free" if archetypal_opts is None else "archetypal"
     archetypal_C = None
     ra_delta = 1.0
+
     if archetypal_opts is not None:
         C_np = _maybe_make_prototypes(embeddings, checkpoint_dir, archetypal_opts, input_dim)
         archetypal_C = torch.from_numpy(C_np)
         ra_delta = float(archetypal_opts.get("delta", 1.0))
+
     model = SparseAutoencoder(
         input_dim=input_dim,
         m_total_neurons=M,
@@ -108,6 +166,7 @@ def train_sae(
         archetypal_C=archetypal_C,
         ra_delta=ra_delta
     )
+
     model.fit(
         X_train=X,
         X_val=X_val,
@@ -130,23 +189,34 @@ def benchmark_stability(
     train_kwargs: dict,
     archetypal_opts: dict | None = None
 ) -> dict:
+    """
+    Trains multiple SAEs (with different training seeds) and returns mean pairwise
+    dictionary stability. If archetypal_opts is provided, prototypes are computed ONCE
+    here (or loaded from cache) and then *frozen* for all runs.
+    """
+    embeddings = np.array(embeddings, dtype=np.float32)
+    input_dim = embeddings.shape[1]
+
+    fixed_opts = _freeze_prototypes_for_benchmark(
+        embeddings=embeddings,
+        archetypal_opts=archetypal_opts,
+        checkpoint_dir=train_kwargs.get("checkpoint_dir", None),
+        input_dim=input_dim
+    )
+
     models, dicts = [], []
     for s in seeds:
         set_seed(s)
-        opts = None
-        if archetypal_opts is not None:
-            opts = dict(archetypal_opts)
-            opts.setdefault('random_state', s)
-            opts.setdefault('cache_prototypes', True)
         mdl = train_sae(
             embeddings=embeddings,
             M=M,
             K=K,
-            archetypal_opts=opts,
+            archetypal_opts=fixed_opts,  
             **train_kwargs
         )
         models.append(mdl)
         dicts.append(dictionary_from_model(mdl))
+
     return {"mean_pairwise_stability": average_pairwise_stability(dicts), "num_runs": len(models)}
 
 def interpret_sae(
