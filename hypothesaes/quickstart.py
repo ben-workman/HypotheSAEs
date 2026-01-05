@@ -600,3 +600,314 @@ def evaluate_hypotheses(
     )
     
     return metrics, evaluation_df
+
+
+def generate_hypotheses_meta(
+    texts: List[str],
+    labels: Union[List[int], List[float], np.ndarray],
+    embeddings: Union[List, np.ndarray],
+    cache_name: str,
+    *,
+    # Meta-feature construction options
+    meta_feature_set: Optional["MetaFeatureSet"] = None,
+    seeds: Optional[List[int]] = None,
+    M: Union[int, List[int]] = 256,
+    K: int = 32,
+    X_align: Optional[np.ndarray] = None,
+    checkpoint_dir: Optional[str] = None,
+    archetypal_opts: Optional[dict] = None,
+    alpha: float = 0.5,
+    cluster_threshold: float = 0.7,
+    cluster_method: str = "average",
+    min_support: float = 0.3,
+    pooling: str = "softmax",
+    tau: float = 1.0,
+    standardize_activations: bool = True,
+    # Grouping
+    group_ids: Optional[np.ndarray] = None,
+    # Selection options (uses stability selection)
+    stability_n_bootstrap: int = 200,
+    stability_sample_fraction: float = 0.5,
+    stability_q: Optional[int] = None,
+    stability_pi_threshold: float = 0.7,
+    stability_random_state: Optional[int] = None,
+    stability_n_alphas: int = 100,
+    stability_standardize: bool = True,
+    stability_group_subsample: bool = True,
+    stability_cpps: bool = False,
+    stability_jitter_range: tuple = (1.0, 1.0),
+    # Interpretation options
+    interpreter_model: str = "gpt-4o",
+    annotator_model: str = "gpt-4o-mini",
+    n_examples_for_interpretation: int = 20,
+    max_words_per_example: int = 256,
+    interpret_temperature: float = 0.7,
+    max_interpretation_tokens: int = 50,
+    n_candidate_interpretations: int = 1,
+    n_scoring_examples: int = 100,
+    scoring_metric: str = "f1",
+    n_workers_interpretation: int = 10,
+    n_workers_annotation: int = 30,
+    interpretation_sampling_function: Callable = sample_top_zero,
+    interpretation_sampling_kwargs: Optional[Dict[str, Any]] = None,
+    scoring_sampling_function: Callable = sample_top_zero,
+    scoring_sampling_kwargs: Optional[Dict[str, Any]] = None,
+    task_specific_instructions: Optional[str] = None,
+    # SAE training options
+    **train_kwargs
+) -> Tuple[pd.DataFrame, "MetaFeatureSet"]:
+    """
+    Generate hypotheses using meta-features for improved stability.
+    
+    This function builds meta-features by training an ensemble of SAEs, 
+    aligning and clustering features across runs, then uses stability 
+    selection on the pooled meta-activations to find robust associations 
+    with the target variable.
+    
+    Args:
+        texts: Input text examples
+        labels: Target variable (binary or continuous, per-sample or per-group)
+        embeddings: Pre-computed embeddings for the input texts
+        cache_name: Name for caching interpretations
+        
+        # Meta-feature options
+        meta_feature_set: Pre-built MetaFeatureSet; if None, builds from scratch
+        seeds: Random seeds for SAE ensemble (default: [10, 20, 30, 40, 50])
+        M: Number of dictionary atoms (or list for matryoshka)
+        K: Number of active neurons per input
+        X_align: Alignment set for feature similarity; if None, uses embeddings
+        checkpoint_dir: Directory to save/load SAE checkpoints
+        archetypal_opts: Options for archetypal decoder; None for free decoder
+        alpha: Weight for decoder cosine vs activation correlation in similarity
+        cluster_threshold: Similarity threshold for clustering
+        cluster_method: Linkage method for hierarchical clustering
+        min_support: Minimum fraction of runs a cluster must appear in
+        pooling: Pooling method for meta-activations ('max', 'softmax', 'mean')
+        tau: Temperature for softmax pooling
+        standardize_activations: Whether to z-score feature activations before pooling
+        
+        # Grouping
+        group_ids: Group IDs for aggregation (e.g., teacher IDs)
+        
+        # Stability selection options
+        stability_*: Parameters passed to stability_select_lasso
+        
+        # Interpretation options
+        interpreter_model: LLM for generating interpretations
+        annotator_model: LLM for scoring interpretations
+        ... (other interpretation parameters)
+        
+        # SAE training options
+        **train_kwargs: Additional arguments passed to train_sae
+    
+    Returns:
+        Tuple of (hypotheses DataFrame, MetaFeatureSet)
+        
+        The DataFrame contains columns:
+        - meta_feature_idx: Index of the meta-feature
+        - support: Fraction of SAE runs containing this meta-feature
+        - coherence: Mean intra-cluster similarity
+        - selection_pi: Stability selection probability
+        - best_interpretation: Best interpretation text
+        - f1_fidelity_score: F1 score measuring interpretation fidelity
+        - interpretation_1, interpretation_2, ...: Candidate interpretations
+    """
+    from .meta_features import build_meta_features, MetaFeatureSet
+    
+    interpretation_sampling_kwargs = interpretation_sampling_kwargs or {}
+    scoring_sampling_kwargs = scoring_sampling_kwargs or {}
+    labels = np.array(labels)
+    embeddings = np.array(embeddings)
+    
+    # Default seeds if not provided
+    if seeds is None:
+        seeds = [10, 20, 30, 40, 50]
+    
+    # Build or use provided meta-feature set
+    if meta_feature_set is None:
+        print(f"Building meta-features from {len(seeds)} SAE runs...")
+        meta_feature_set = build_meta_features(
+            embeddings=embeddings,
+            M=M,
+            K=K,
+            seeds=seeds,
+            X_align=X_align,
+            checkpoint_dir=checkpoint_dir,
+            archetypal_opts=archetypal_opts,
+            alpha=alpha,
+            cluster_threshold=cluster_threshold,
+            cluster_method=cluster_method,
+            min_support=min_support,
+            show_progress=True,
+            **train_kwargs
+        )
+    
+    # Compute meta-activations
+    print(f"Computing pooled meta-activations for {meta_feature_set.n_meta_features} meta-features...")
+    meta_activations = meta_feature_set.get_activations(
+        X=embeddings,
+        pooling=pooling,
+        tau=tau,
+        standardize=standardize_activations,
+        X_align=X_align
+    )
+    
+    # Run stability selection on meta-activations
+    print("Running stability selection on meta-activations...")
+    extra_args = {}
+    if group_ids is not None:
+        extra_args["group_ids"] = group_ids
+    
+    extra_args.update({
+        "n_bootstrap": stability_n_bootstrap,
+        "sample_fraction": stability_sample_fraction,
+        "q": stability_q,
+        "pi_threshold": stability_pi_threshold,
+        "random_state": stability_random_state,
+        "n_alphas": stability_n_alphas,
+        "standardize": stability_standardize,
+        "group_subsample": stability_group_subsample,
+        "cpps": stability_cpps,
+        "jitter_range": stability_jitter_range,
+    })
+    
+    selected_meta_features, selection_pis = select_neurons(
+        activations=meta_activations,
+        target=labels,
+        n_select=0,  # Stability selection determines its own selection
+        method="stability",
+        **extra_args
+    )
+    
+    print(f"Selected {len(selected_meta_features)} meta-features with pi >= {stability_pi_threshold}")
+    
+    if len(selected_meta_features) == 0:
+        print("Warning: No meta-features selected. Try lowering stability_pi_threshold.")
+        return pd.DataFrame(), meta_feature_set
+    
+    # For interpretation, we need to use representative features from each cluster
+    # We'll use the activations from a representative feature of each selected cluster
+    representatives = meta_feature_set.get_representative_features(n_per_cluster=1)
+    
+    # Build a combined activation matrix from representative features
+    # for interpretation purposes
+    all_acts_list = []
+    for sae in meta_feature_set.sae_list:
+        X_tensor = torch.tensor(embeddings, dtype=torch.float32).to(device)
+        all_acts_list.append(sae.get_activations(X_tensor))
+    
+    # Create interpretation activations using representative features
+    interp_activations = np.zeros((len(embeddings), len(selected_meta_features)), dtype=np.float32)
+    selected_rep_info = []
+    
+    for i, mf_idx in enumerate(selected_meta_features):
+        rep_list = representatives[mf_idx]
+        if rep_list:
+            run_idx, local_idx = rep_list[0]
+            interp_activations[:, i] = all_acts_list[run_idx][:, local_idx]
+            selected_rep_info.append((mf_idx, run_idx, local_idx))
+    
+    # Interpret the selected meta-features (using representative activations)
+    interpreter = NeuronInterpreter(
+        cache_name=cache_name,
+        interpreter_model=interpreter_model,
+        annotator_model=annotator_model,
+        n_workers_interpretation=n_workers_interpretation,
+        n_workers_annotation=n_workers_annotation,
+    )
+    
+    interpret_config = InterpretConfig(
+        sampling=SamplingConfig(
+            function=interpretation_sampling_function,
+            n_examples=n_examples_for_interpretation,
+            max_words_per_example=max_words_per_example,
+            extra_kwargs=interpretation_sampling_kwargs,
+        ),
+        llm=LLMConfig(
+            temperature=interpret_temperature,
+            max_interpretation_tokens=max_interpretation_tokens,
+            timeout=120
+        ),
+        n_candidates=n_candidate_interpretations,
+        task_specific_instructions=task_specific_instructions,
+    )
+    
+    # Map indices for interpretation (0 to n_selected-1)
+    interp_indices = list(range(len(selected_meta_features)))
+    
+    interpretations = interpreter.interpret_neurons(
+        texts=texts,
+        activations=interp_activations,
+        neuron_indices=interp_indices,
+        config=interpret_config,
+    )
+    
+    # Score interpretations if requested
+    metrics = {}
+    if n_scoring_examples > 0:
+        scoring_config = ScoringConfig(
+            n_examples=n_scoring_examples,
+            sampling_function=scoring_sampling_function,
+            sampling_kwargs=scoring_sampling_kwargs,
+        )
+        metrics = interpreter.score_interpretations(
+            texts=texts,
+            activations=interp_activations,
+            interpretations=interpretations,
+            config=scoring_config
+        )
+    
+    # Build results DataFrame
+    cluster_info = meta_feature_set.get_cluster_info()
+    results = []
+    
+    for i, (mf_idx, pi) in enumerate(zip(selected_meta_features, selection_pis)):
+        info = cluster_info[mf_idx]
+        
+        row = {
+            "meta_feature_idx": mf_idx,
+            "support": info["support"],
+            "coherence": info["coherence"],
+            "n_cluster_members": info["n_members"],
+            "n_runs_in_cluster": info["n_runs"],
+            "selection_pi": pi,
+        }
+        
+        # Add interpretations
+        interp_list = interpretations.get(i, [])
+        for j, interp in enumerate(interp_list, start=1):
+            row[f"interpretation_{j}"] = interp
+            if n_scoring_examples > 0 and i in metrics and interp in metrics[i]:
+                row[f"{scoring_metric}_score_{j}"] = metrics[i][interp][scoring_metric]
+            else:
+                row[f"{scoring_metric}_score_{j}"] = None
+        
+        # Pad with None for missing interpretations
+        for j in range(len(interp_list) + 1, n_candidate_interpretations + 1):
+            row[f"interpretation_{j}"] = None
+            row[f"{scoring_metric}_score_{j}"] = None
+        
+        # Best interpretation
+        if n_scoring_examples > 0 and i in metrics and interp_list:
+            best = max(interp_list, key=lambda t: metrics[i].get(t, {}).get(scoring_metric, 0))
+            row["best_interpretation"] = best
+            row[f"{scoring_metric}_fidelity_score"] = metrics[i].get(best, {}).get(scoring_metric)
+        else:
+            row["best_interpretation"] = interp_list[0] if interp_list else None
+            row[f"{scoring_metric}_fidelity_score"] = None
+        
+        results.append(row)
+    
+    df = pd.DataFrame(results)
+    
+    # Reorder columns
+    base_cols = [
+        "meta_feature_idx", "support", "coherence", "n_cluster_members",
+        "n_runs_in_cluster", "selection_pi", "best_interpretation",
+        f"{scoring_metric}_fidelity_score"
+    ]
+    interp_cols = [c for c in df.columns if c.startswith("interpretation_") or c.startswith(f"{scoring_metric}_score_")]
+    other_cols = [c for c in df.columns if c not in base_cols and c not in interp_cols]
+    df = df[base_cols + interp_cols + other_cols]
+    
+    return df, meta_feature_set

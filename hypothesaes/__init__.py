@@ -8,7 +8,18 @@ from .quickstart import (
     train_sae,
     interpret_sae,
     generate_hypotheses,
+    generate_hypotheses_meta,
     evaluate_hypotheses
+)
+
+from .meta_features import (
+    MetaFeatureSet,
+    build_meta_features,
+    train_sae_ensemble,
+    compute_cross_run_similarity,
+    cluster_meta_features,
+    interpret_meta_features,
+    synthesize_meta_interpretation
 )
 
 from .sae import (
@@ -43,13 +54,23 @@ __all__ = [
     # Main workflow functions
     "train_sae",
     "interpret_sae", 
-    "generate_hypotheses", 
+    "generate_hypotheses",
+    "generate_hypotheses_meta",
     "evaluate_hypotheses",
     
     # Core classes
     "SparseAutoencoder",
     "load_model",
     "get_multiple_sae_activations",
+    
+    # Meta-features
+    "MetaFeatureSet",
+    "build_meta_features",
+    "train_sae_ensemble",
+    "compute_cross_run_similarity",
+    "cluster_meta_features",
+    "interpret_meta_features",
+    "synthesize_meta_interpretation",
     
     # Embedding functions
     "get_openai_embeddings",
