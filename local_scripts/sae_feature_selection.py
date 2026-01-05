@@ -14,7 +14,6 @@ from __future__ import annotations
 import os
 import numpy as np
 import pandas as pd
-import torch
 
 from HypotheSAEs.hypothesaes.quickstart import set_seed, train_sae, generate_hypotheses
 
@@ -34,11 +33,6 @@ def load_teacher_va_data_from_drive(
         (train_texts, train_embeddings, train_labels, train_group_ids,
          test_texts, test_embeddings, test_labels, test_group_ids)
     """
-    # Colab-only import
-    from google.colab import drive
-
-    drive.mount("/content/drive")
-
     embeddings = pd.read_csv(os.path.join(drive_root, embeddings_csv))
     transcripts = pd.read_csv(os.path.join(drive_root, transcripts_csv))
     teacher_info = pd.read_csv(os.path.join(drive_root, teacher_info_csv))
@@ -97,64 +91,75 @@ def load_teacher_va_data_from_drive(
         test_group_ids,
     )
 
+# ============================================================================
+# Notebook-style execution (ready to run in Colab)
+# ============================================================================
+# Setup (run these in Colab):
+# !git clone https://github.com/ben-workman/HypotheSAEs
+# !pip install hypothesaes
+#
+# Do NOT hardcode keys; set them in Colab via Secrets or:
+# os.environ["OPENAI_API_KEY"] = "..."
+# os.environ["OPENAI_KEY_SAE"] = "..."
 
-def main() -> None:
-    # Do NOT hardcode keys; set them in Colab via Secrets or:
-    # os.environ["OPENAI_API_KEY"] = "..."
-    # os.environ["OPENAI_KEY_SAE"] = "..."
+try:
+    from google.colab import drive  # type: ignore
 
-    set_seed(123)
+    drive.mount("/content/drive")
+except Exception:
+    # Non-Colab environment
+    pass
 
-    (
-        train_texts,
-        train_embeddings,
-        train_labels,
-        train_group_ids,
-        _test_texts,
-        _test_embeddings,
-        _test_labels,
-        _test_group_ids,
-    ) = load_teacher_va_data_from_drive()
+set_seed(123)
 
-    print("Train texts:", len(train_texts))
-    print("Train embeddings shape:", train_embeddings.shape)
-    print("Unique teachers (train):", len(np.unique(train_group_ids)))
+# 1) Load data (same logic as original notebook)
+(
+    train_texts,
+    train_embeddings,
+    train_labels,
+    train_group_ids,
+    _test_texts,
+    _test_embeddings,
+    _test_labels,
+    _test_group_ids,
+) = load_teacher_va_data_from_drive()
 
-    # Train a single SAE (matryoshka; keep small for sanity checks)
-    checkpoint_dir = "/content/drive/MyDrive/Research/Predicting Teacher Value-Added/SAEs/model_checkpoint/"
-    sae = train_sae(
-        embeddings=train_embeddings,
-        M=[64, 128, 256],
-        K=32,
-        aux_coef=1 / 4,
-        checkpoint_dir=checkpoint_dir,
-        n_epochs=50,
-        patience=3,
-        batch_size=1024,
-        overwrite_checkpoint=True,
-    )
+print("Train texts:", len(train_texts))
+print("Train embeddings shape:", train_embeddings.shape)
+print("Unique teachers (train):", len(np.unique(train_group_ids)))
 
-    # Generate hypotheses (uses existing feature selection + interpretation infra)
-    hypotheses_df = generate_hypotheses(
-        texts=train_texts,
-        labels=train_labels,
-        embeddings=train_embeddings,
-        sae=sae,
-        cache_name="teacher_va_single_sae",
-        group_ids=train_group_ids,
-        selection_method="stability",
-        n_selected_neurons=20,
-        n_candidate_interpretations=2,
-        n_scoring_examples=60,
-        filter=False,
-    )
+# 2) Train a single SAE (matryoshka; keep small for sanity checks)
+checkpoint_dir = "/content/drive/MyDrive/Research/Predicting Teacher Value-Added/SAEs/model_checkpoint/"
 
-    out_path = "/content/drive/MyDrive/Research/Predicting Teacher Value-Added/Data/Constructed Data/9_12_24/feature_information_single_sae.csv"
-    hypotheses_df.to_csv(out_path, index=False)
-    print("Saved:", out_path)
+sae = train_sae(
+    embeddings=train_embeddings,
+    M=[64, 128, 256],
+    K=32,
+    aux_coef=1 / 4,
+    checkpoint_dir=checkpoint_dir,
+    n_epochs=50,
+    patience=3,
+    batch_size=1024,
+    overwrite_checkpoint=True,
+)
 
+# 3) Generate hypotheses (existing selection + interpretation infra)
+hypotheses_df = generate_hypotheses(
+    texts=train_texts,
+    labels=train_labels,
+    embeddings=train_embeddings,
+    sae=sae,
+    cache_name="teacher_va_single_sae",
+    group_ids=train_group_ids,
+    selection_method="stability",
+    n_selected_neurons=20,
+    n_candidate_interpretations=2,
+    n_scoring_examples=60,
+    filter=False,
+)
 
-if __name__ == "__main__":
-    main()
+out_path = "/content/drive/MyDrive/Research/Predicting Teacher Value-Added/Data/Constructed Data/9_12_24/feature_information_single_sae.csv"
+hypotheses_df.to_csv(out_path, index=False)
+print("Saved:", out_path)
 
 
