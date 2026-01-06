@@ -6,7 +6,7 @@ Teacher VA example using the *meta-feature* SAE workflow:
 - Compute pooled meta-activations
 - Stability select meta-features predictive of y (supports per-sample or per-group y)
 - Interpret member features, then synthesize a single meta-feature description
-- Score the synthesized interpretation (fidelity)
+- Score the synthesized interpretation (fidelity) 
 
 This file is intentionally kept OUTSIDE the installable `hypothesaes/` package.
 """
@@ -138,7 +138,7 @@ meta_acts = meta_feature_set.get_activations(
     standardize=True,
 )
 
-selected, selected_pi, _pi_full = select_neurons_stability(
+selected, selected_pi = select_neurons_stability(
     activations=meta_acts,
     target=train_labels,
     group_ids=train_group_ids,  # enables group-level subsampling
