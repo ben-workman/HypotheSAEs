@@ -2,10 +2,31 @@
 
 import time
 import numpy as np
-from typing import List, Optional, Callable, Tuple
-from sklearn.linear_model import Lasso, LogisticRegression, lasso_path, LinearRegression 
+from typing import List, Optional, Callable, Tuple, Sequence
+from sklearn.linear_model import (
+    ElasticNetCV,
+    Lasso,
+    LinearRegression,
+    LogisticRegression,
+    LogisticRegressionCV,
+    lasso_path,
+)
 from sklearn.preprocessing import StandardScaler 
 from scipy.stats import pearsonr
+
+
+def _aggregate_by_group_mean(
+    activations: np.ndarray, target: np.ndarray, group_ids: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Aggregate activations/targets to one row per group (mean)."""
+    unique_ids = np.unique(group_ids)
+    aggregated_activations = []
+    aggregated_target = []
+    for uid in unique_ids:
+        indices = np.where(group_ids == uid)[0]
+        aggregated_activations.append(activations[indices].mean(axis=0))
+        aggregated_target.append(target[indices].mean())
+    return np.vstack(aggregated_activations), np.array(aggregated_target)
 
 
 def select_neurons_lasso(
@@ -203,6 +224,79 @@ def select_neurons_presence_correlation(
     ])
     sorted_indices = np.argsort(-np.abs(correlations))[:n_select]
     return sorted_indices.tolist(), correlations[sorted_indices].tolist()
+
+
+def select_neurons_elasticnet_cv(
+    activations: np.ndarray,
+    target: np.ndarray,
+    n_select: int,
+    *,
+    classification: bool = False,
+    group_ids: Optional[np.ndarray] = None,
+    standardize: bool = True,
+    cv: int = 5,
+    l1_ratios: Sequence[float] = (0.1, 0.5, 0.9, 1.0),
+    n_alphas: int = 100,
+    max_iter: int = 5000,
+    random_state: Optional[int] = 0,
+) -> Tuple[List[int], List[float]]:
+    """
+    Cross-validated Elastic Net feature selection.
+
+    - Regression: ElasticNetCV
+    - Binary classification: LogisticRegressionCV with elastic-net penalty (solver='saga')
+
+    Returns:
+        (indices, coefficients) for the selected features.
+    """
+    if group_ids is not None:
+        activations, target = _aggregate_by_group_mean(activations, target, group_ids)
+
+    X = np.asarray(activations, dtype=float)
+    y = np.asarray(target)
+
+    if standardize:
+        X = StandardScaler().fit_transform(X)
+
+    if classification:
+        uniq = np.unique(y)
+        if not np.all(np.isin(uniq, [0, 1])):
+            raise ValueError(
+                "elasticnet_cv currently supports binary classification only (targets must be 0/1)."
+            )
+        model = LogisticRegressionCV(
+            penalty="elasticnet",
+            solver="saga",
+            l1_ratios=list(l1_ratios),
+            cv=cv,
+            scoring="neg_log_loss",
+            max_iter=max_iter,
+            random_state=random_state,
+            refit=True,
+        )
+        model.fit(X, y)
+        coef = model.coef_.reshape(-1)
+    else:
+        model = ElasticNetCV(
+            l1_ratio=list(l1_ratios),
+            n_alphas=n_alphas,
+            cv=cv,
+            max_iter=max_iter,
+            random_state=random_state,
+        )
+        model.fit(X, y)
+        coef = np.asarray(model.coef_).reshape(-1)
+
+    abs_coef = np.abs(coef)
+    if n_select is None or n_select <= 0:
+        selected = np.flatnonzero(abs_coef > 0)
+        if selected.size == 0:
+            selected = np.array([int(np.argmax(abs_coef))])
+    else:
+        selected = np.argsort(-abs_coef)[:n_select]
+
+    selected = selected.astype(int)
+    return selected.tolist(), coef[selected].tolist()
 
 def stability_select_lasso(
     X, y, *,
@@ -428,6 +522,14 @@ def select_neurons(
         raise ValueError("classification=True, but the target variable has more than 2 classes")
     if method == "lasso":
         return select_neurons_lasso(activations=activations, target=target, n_select=n_select, classification=classification, **kwargs)
+    elif method in {"elasticnet_cv", "elasticnet", "enet"}:
+        return select_neurons_elasticnet_cv(
+            activations=activations,
+            target=target,
+            n_select=n_select,
+            classification=classification,
+            **kwargs
+        )
     elif method == "correlation":
         return select_neurons_correlation(activations=activations, target=target, n_select=n_select, **kwargs)
     elif method == "separation_score":

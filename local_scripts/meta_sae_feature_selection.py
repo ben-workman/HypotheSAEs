@@ -19,7 +19,7 @@ import pandas as pd
 
 from HypotheSAEs.hypothesaes.quickstart import set_seed
 from HypotheSAEs.hypothesaes.meta_features import build_meta_features, interpret_meta_features
-from HypotheSAEs.hypothesaes.select_neurons import select_neurons_stability
+from HypotheSAEs.hypothesaes.select_neurons import select_neurons, select_neurons_stability
 from HypotheSAEs.hypothesaes.interpret_neurons import NeuronInterpreter, ScoringConfig, sample_top_zero
 
 
@@ -130,7 +130,7 @@ meta_feature_set = build_meta_features(
 
 print("Meta-features:", meta_feature_set.n_meta_features)
 
-# 3) Build meta-activations and run stability selection
+# 3) Build meta-activations and run selection
 meta_acts = meta_feature_set.get_activations(
     X=train_embeddings,
     pooling="softmax",
@@ -138,18 +138,36 @@ meta_acts = meta_feature_set.get_activations(
     standardize=True,
 )
 
-selected, selected_pi = select_neurons_stability(
-    activations=meta_acts,
-    target=train_labels,
-    group_ids=train_group_ids,  # enables group-level subsampling
-    group_subsample=True,
-    n_bootstrap=100,
-    q=20,
-    pi_threshold=0.6,
-    random_state=123,
-    return_diagnostics=False,
-    return_full_pi=False,  # Set to True if you need the full pi array
-)
+selection_method = "stability"  # or: "elasticnet_cv"
+
+if selection_method == "stability":
+    selected, selected_pi = select_neurons_stability(
+        activations=meta_acts,
+        target=train_labels,
+        group_ids=train_group_ids,  # enables group-level subsampling
+        group_subsample=True,
+        n_bootstrap=100,
+        q=20,
+        pi_threshold=0.6,
+        random_state=123,
+        return_diagnostics=False,
+        return_full_pi=False,  # Set to True if you need the full pi array
+    )
+else:
+    # Cross-validated Elastic Net (regression). Uses per-teacher aggregation via group_ids.
+    selected, selected_pi = select_neurons(
+        activations=meta_acts,
+        target=train_labels,
+        n_select=20,
+        method=selection_method,
+        group_ids=train_group_ids,
+        cv=5,
+        l1_ratios=(0.1, 0.5, 0.9, 1.0),
+        n_alphas=100,
+        max_iter=5000,
+        random_state=123,
+        standardize=True,
+    )
 
 if not selected:
     raise RuntimeError("No meta-features selected. Try lowering pi_threshold or min_support.")

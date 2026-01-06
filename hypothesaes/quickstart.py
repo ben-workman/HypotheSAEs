@@ -625,7 +625,18 @@ def generate_hypotheses_meta(
     standardize_activations: bool = True,
     # Grouping
     group_ids: Optional[np.ndarray] = None,
-    # Selection options (uses stability selection)
+    # Selection options
+    classification: Optional[bool] = None,
+    selection_method: str = "stability",
+    n_selected_meta_features: int = 20,
+    # ElasticNetCV options (only used if selection_method in {"elasticnet_cv","elasticnet","enet"})
+    elasticnet_cv: int = 5,
+    elasticnet_l1_ratios: Tuple[float, ...] = (0.1, 0.5, 0.9, 1.0),
+    elasticnet_n_alphas: int = 100,
+    elasticnet_max_iter: int = 5000,
+    elasticnet_random_state: Optional[int] = 0,
+    elasticnet_standardize: bool = True,
+    # Stability selection options
     stability_n_bootstrap: int = 200,
     stability_sample_fraction: float = 0.5,
     stability_q: Optional[int] = None,
@@ -707,7 +718,7 @@ def generate_hypotheses_meta(
         - meta_feature_idx: Index of the meta-feature
         - support: Fraction of SAE runs containing this meta-feature
         - coherence: Mean intra-cluster similarity
-        - selection_pi: Stability selection probability
+        - selection_pi or target_{selection_method}: Selection score (depends on selection_method)
         - best_interpretation: Best interpretation text
         - f1_fidelity_score: F1 score measuring interpretation fidelity
         - interpretation_1, interpretation_2, ...: Candidate interpretations
@@ -718,6 +729,13 @@ def generate_hypotheses_meta(
     scoring_sampling_kwargs = scoring_sampling_kwargs or {}
     labels = np.array(labels)
     embeddings = np.array(embeddings)
+    if classification is None:
+        classification = np.all(
+            np.isin(
+                np.random.choice(labels, size=min(1000, len(labels)), replace=True),
+                [0, 1],
+            )
+        )
     
     # Default seeds if not provided
     if seeds is None:
@@ -752,37 +770,59 @@ def generate_hypotheses_meta(
         X_align=X_align
     )
     
-    # Run stability selection on meta-activations
-    print("Running stability selection on meta-activations...")
+    # Run selection on meta-activations
+    selection_method = str(selection_method)
     extra_args = {}
     if group_ids is not None:
         extra_args["group_ids"] = group_ids
-    
-    extra_args.update({
-        "n_bootstrap": stability_n_bootstrap,
-        "sample_fraction": stability_sample_fraction,
-        "q": stability_q,
-        "pi_threshold": stability_pi_threshold,
-        "random_state": stability_random_state,
-        "n_alphas": stability_n_alphas,
-        "standardize": stability_standardize,
-        "group_subsample": stability_group_subsample,
-        "cpps": stability_cpps,
-        "jitter_range": stability_jitter_range,
-    })
-    
-    selected_meta_features, selection_pis = select_neurons(
-        activations=meta_activations,
-        target=labels,
-        n_select=0,  # Stability selection determines its own selection
-        method="stability",
-        **extra_args
-    )
-    
-    print(f"Selected {len(selected_meta_features)} meta-features with pi >= {stability_pi_threshold}")
+
+    if selection_method == "stability":
+        print("Running stability selection on meta-activations...")
+        extra_args.update({
+            "n_bootstrap": stability_n_bootstrap,
+            "sample_fraction": stability_sample_fraction,
+            "q": stability_q,
+            "pi_threshold": stability_pi_threshold,
+            "random_state": stability_random_state,
+            "n_alphas": stability_n_alphas,
+            "standardize": stability_standardize,
+            "group_subsample": stability_group_subsample,
+            "cpps": stability_cpps,
+            "jitter_range": stability_jitter_range,
+        })
+        selected_meta_features, selection_scores = select_neurons(
+            activations=meta_activations,
+            target=labels,
+            n_select=0,  # Stability selection determines its own selection
+            method="stability",
+            classification=bool(classification),
+            **extra_args
+        )
+        selection_col = "selection_pi"
+        print(f"Selected {len(selected_meta_features)} meta-features with pi >= {stability_pi_threshold}")
+    else:
+        print(f"Running {selection_method} selection on meta-activations...")
+        if selection_method in {"elasticnet_cv", "elasticnet", "enet"}:
+            extra_args.update({
+                "cv": elasticnet_cv,
+                "l1_ratios": elasticnet_l1_ratios,
+                "n_alphas": elasticnet_n_alphas,
+                "max_iter": elasticnet_max_iter,
+                "random_state": elasticnet_random_state,
+                "standardize": elasticnet_standardize,
+            })
+        selected_meta_features, selection_scores = select_neurons(
+            activations=meta_activations,
+            target=labels,
+            n_select=n_selected_meta_features,
+            method=selection_method,
+            classification=bool(classification),
+            **extra_args
+        )
+        selection_col = f"target_{selection_method}"
     
     if len(selected_meta_features) == 0:
-        print("Warning: No meta-features selected. Try lowering stability_pi_threshold.")
+        print("Warning: No meta-features selected. Try adjusting selection_method and its hyperparameters.")
         return pd.DataFrame(), meta_feature_set
     
     # For interpretation, we need to use representative features from each cluster
@@ -861,7 +901,7 @@ def generate_hypotheses_meta(
     cluster_info = meta_feature_set.get_cluster_info()
     results = []
     
-    for i, (mf_idx, pi) in enumerate(zip(selected_meta_features, selection_pis)):
+    for i, (mf_idx, score) in enumerate(zip(selected_meta_features, selection_scores)):
         info = cluster_info[mf_idx]
         
         row = {
@@ -870,7 +910,7 @@ def generate_hypotheses_meta(
             "coherence": info["coherence"],
             "n_cluster_members": info["n_members"],
             "n_runs_in_cluster": info["n_runs"],
-            "selection_pi": pi,
+            selection_col: score,
         }
         
         # Add interpretations
@@ -903,7 +943,7 @@ def generate_hypotheses_meta(
     # Reorder columns
     base_cols = [
         "meta_feature_idx", "support", "coherence", "n_cluster_members",
-        "n_runs_in_cluster", "selection_pi", "best_interpretation",
+        "n_runs_in_cluster", selection_col, "best_interpretation",
         f"{scoring_metric}_fidelity_score"
     ]
     interp_cols = [c for c in df.columns if c.startswith("interpretation_") or c.startswith(f"{scoring_metric}_score_")]

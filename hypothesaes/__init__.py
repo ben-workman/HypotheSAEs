@@ -44,7 +44,7 @@ from .interpret_neurons import (
     sample_percentile_bins
 )
 
-from .select_neurons import select_neurons, select_neurons_stability
+from .select_neurons import select_neurons, select_neurons_stability, select_neurons_elasticnet_cv
 
 from .evaluation import score_hypotheses
 
@@ -92,6 +92,7 @@ __all__ = [
     # Selection and evaluation
     "select_neurons",
     "select_neurons_stability",
+    "select_neurons_elasticnet_cv",
     "score_hypotheses",
     "annotate_texts_with_concepts",
     
