@@ -148,6 +148,7 @@ selected, selected_pi = select_neurons_stability(
     pi_threshold=0.6,
     random_state=123,
     return_diagnostics=False,
+    return_full_pi=False,  # Set to True if you need the full pi array
 )
 
 if not selected:

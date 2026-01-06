@@ -5,6 +5,7 @@ __version__ = "0.0.3"
 
 # Import key functions and classes to expose at the package level
 from .quickstart import (
+    set_seed,
     train_sae,
     interpret_sae,
     generate_hypotheses,
@@ -38,10 +39,12 @@ from .interpret_neurons import (
     InterpretConfig,
     ScoringConfig,
     LLMConfig,
-    SamplingConfig
+    SamplingConfig,
+    sample_top_zero,
+    sample_percentile_bins
 )
 
-from .select_neurons import select_neurons
+from .select_neurons import select_neurons, select_neurons_stability
 
 from .evaluation import score_hypotheses
 
@@ -52,6 +55,7 @@ from .utils import get_text_for_printing
 # Define what gets imported with "from hypothesaes import *"
 __all__ = [
     # Main workflow functions
+    "set_seed",
     "train_sae",
     "interpret_sae", 
     "generate_hypotheses",
@@ -82,9 +86,12 @@ __all__ = [
     "ScoringConfig",
     "LLMConfig",
     "SamplingConfig",
+    "sample_top_zero",
+    "sample_percentile_bins",
     
     # Selection and evaluation
     "select_neurons",
+    "select_neurons_stability",
     "score_hypotheses",
     "annotate_texts_with_concepts",
     

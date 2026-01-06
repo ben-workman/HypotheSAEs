@@ -350,11 +350,40 @@ def select_neurons_stability(
     jitter_range: tuple = (1.0, 1.0),
     return_refit: bool = False,
     return_diagnostics: bool = False,
-) -> Tuple[List[int], List[float]]:
+    return_full_pi: bool = False,
+):
+    """
+    Select neurons using stability selection with LASSO.
+    
+    Args:
+        activations: (n_samples, n_features) array
+        target: (n_samples,) target variable
+        n_select: Not used (kept for API consistency)
+        group_ids: Optional group IDs for group-level subsampling
+        n_bootstrap: Number of bootstrap iterations
+        sample_fraction: Fraction of samples per bootstrap
+        q: Target number of features per fit
+        pi_threshold: Selection probability threshold
+        random_state: Random seed
+        n_alphas: Number of regularization alphas to try
+        standardize: Whether to standardize features
+        group_subsample: Whether to subsample by group
+        cpps: Whether to use complementary pairs stability selection
+        jitter_range: Jitter range for randomized LASSO
+        return_refit: Whether to return refitted coefficients
+        return_diagnostics: Whether to return diagnostics dict
+        return_full_pi: Whether to return full pi array for all features
+    
+    Returns:
+        By default: (selected_indices, selected_pi)
+        If return_full_pi=True: adds pi_full array
+        If return_refit=True: adds (coef_full, intercept)
+        If return_diagnostics=True: adds diagnostics dict
+    """
     p = activations.shape[1]
     if q is None:
         q = max(5, min(50, p // 10))
-    selected, selected_pi, _ = stability_select_lasso(
+    results = stability_select_lasso(
         activations, target,
         B=n_bootstrap,
         frac=sample_fraction,
@@ -370,7 +399,22 @@ def select_neurons_stability(
         return_refit=return_refit,
         return_diagnostics=return_diagnostics
     )
-    return selected, selected_pi
+    # stability_select_lasso always returns at least (selected, selected_pi, pi_full)
+    selected, selected_pi, pi_full = results[:3]
+    
+    # Build output tuple based on what was requested
+    outs = [selected, selected_pi]
+    if return_full_pi:
+        outs.append(pi_full)
+    
+    idx = 3
+    if return_refit:
+        outs.extend([results[idx], results[idx + 1]])
+        idx += 2
+    if return_diagnostics:
+        outs.append(results[idx])
+    
+    return tuple(outs) if len(outs) > 2 else (outs[0], outs[1])
 
 def select_neurons(
     activations: np.ndarray,
